@@ -1,0 +1,166 @@
+	Available metadata fields:
+  User meta data II (MD2) -- 2 bytes, not protected
+  User meta data I  (MD1) -- 4 bytes, protected
+  Total of 516 bytes that can be written at a time
+
+	Block types (Identified by the first byte of MD1 in first chunk):
+Header block (ID 0x1):
+	The first chunk starts with magic number 0x0000 0000 BEEF followed by 8-bit major version and 8-bit minor version, then a 4-byte header sequence number.
+		There is no file information stored in the first chunk
+	Each file chunk contains a 1-byte field equal to 0x01, a 4-byte ID, a 2-byte index of the first block, and a '\0'-terminated filename
+		IDs are generated sequentially. Upon mounting a volume, the maximum ID present must be identified
+		The first byte of MD2 indicates status of the file:
+			0x0F: valid
+			0x00: deleted
+		Chunks are allocated sequentially. If a chunk has a 'valid' marker in MD1, it will be preserved
+	The final chunk uses MD1 to identify the next header block when this is filled
+	If all files allocated from a header block are deleted, this header block may be repurposed
+
+File block (ID 0x02):
+	First chunk:
+		The first chunk starts with:
+			4-byte file ID
+			4-byte file-local block sequence number
+			4-byte global sequence number of the block is written after the ID.
+				This is a counter global to the filesystem to show allocation ordering for block erase timing.
+		If a 0 byte appears after the sequence, the rest of this chunk (499 bytes) is completely full of data. Otherwise it is empty.
+		If a block is encountered which has an 'allocated' marker in MD2 but a 0xFFFFFFFF file ID, it should be erased.
+	Last chunk:
+		The last chunk must indicate the next block in the upper 2 bytes of MD1. If the value is 0, nothing could be allocated.
+	All chunks:
+		The lower two bytes of MD1 indicate the number of data bytes in the chunk. A value of 0xFFFF is invalid...
+		
+
+Block status markers (First byte of MD2 in first chunk):
+	0xFF: Unused, unallocated, completely nothing
+	0x0F: Allocated for whatever reason
+	0x00: Erase me
+
+
+Filesystem initialization ("Formatting"):
+	Erase all blocks.
+	Block 0 is the first header block. This makes it faster to start up. 
+		Write the first chunk of the first block to indicate this
+
+Scan files:
+	1. Start at first header block, read MD2 of each chunk until an unused chunk (MD2[0] == 0xFF) is encountered
+	2. Any chunks in this scanning which contain a 'valid' marker represent a file.
+	3. If the end of a header block is encountered, read MD1 to find next header block.
+	4. If the block pointed to has not been opened (no ID field written in its first chunk), must scan whole disk for next header sequence
+
+Filesystem mounting:
+	1. Read first block to check for required magic number and compatible version
+	2. Scan files to set maximum file sequence number.
+	3. Scan the first chunk of each block for valid files and identify global maximum block sequence number.
+
+Opening an existing file:
+	1. Traverse header blocks until file is found
+	2. Add file to list of open files
+	3. Check for data. If first block is in use and doesn't match ID, delete the file and create a new one.
+	4. If write flag is enabled in opening, traverse file to end and add that block to the global list of open blocks.
+	5. If read flag is enabled, just relax
+
+Opening a new file
+	1. First, make sure file doesn't exist and that the write flag is set. Otherwise, follow instructions for an existing file
+	2. Take an empty chunk at the end of the file list. Mark it immediately as valid (MD1[0] = 0x0F.
+		If there are no free entries in existing blocks:
+			Scan for a free block
+			Mark it with the standard identifiers in the first chunk
+			Search for a first block for the file
+				Mark it as in use immediately -- 
+			Write a new header for the file
+			
+Write to a file
+	1. Buffer until the next chunk boundary
+		If crossing chunk boundary, commit the change unless at the end of the block
+			Write to the chunk...
+		If crossing block boundary, don't commit until another chunk boundary is crossed.
+			When that happens:
+				a. Find new block, add it to 'open block' list and mark the status as 'in use'
+				b. Write first chunk, identifying the next block
+				dc. Write first chunk of next block
+
+Closing a file (writing)
+	If there is up to one chunk of uncommitted data:
+		Write the data. If it's the last chunk in the block, find a new block 
+			If no new block can be found, write a zero. It will have to be searched out...
+
+
+Searching for a free block:
+	1. Go through looking for blocks with a type ID of 0xF.
+		If you find one, use it (if not in bad block list...).
+		Otherwise... scan for the 'delete me' block with the lowest allocation sequence number
+			If none found, fail and abort.
+
+Computing free space (approx):
+	1. Count number of blocks with type ID of 0xF or a 'delete me' flag
+	2. Multiply by the size of the block.
+			
+
+	
+	Chunk types:
+
+  Filesystem ID chunk:
+Second chunk of first page of first block. Starts with magic number 0x0000 0000 BEEF followed by 8-bit major version and 8-bit minor version.
+Flags:
+	0xFF -- Normal
+	0x0F -- The first erase block is now full of files, next erase block is indicated in first bytes of next c
+
+  Next filesystem header chunk:
+This is the first chunk of every block which contains a list of files
+Flags:
+	0xFF -- This block isn't allocated yet
+	0x33 -- There is no next block yet.
+	0x03 -- This one is full. Next block stored in first 2 bytes.
+
+  File header:
+These appear inside a block designated for file headers. A file header chunk consists of a '\0'-terminated filename followed by a 32-bit file ID. creation date in 32-bit UNIX timestamp format.
+Flags:
+	0x0F -- Valid and full
+	0x33 -- Valid to end - value indicated by last two bytes
+	0xFF -- EOF
+Spares:
+	First chunk contains address of next block allocated to it
+
+
+
+Block identification:
+The first chunk of every block must present a uniform indicator of whether the block has been allocated and, if so, whether or not the data can be safely trashed. The primary indicator is the unprotected spare area.
+Byte 0: bad-block indicator:
+	0xFF -- This is fine
+	0x00 -- This is not fine -- never use it again
+Byte 1: Block usage
+	0xFF -- This is unused
+	0x0F -- This is in use
+	0x00 -- Erase this crap
+Byte 3 idicates the block type
+	0xFF -- This is a file block -- ID is in the first 4 bytes
+	0x00 -- This is a header block
+Byte 4
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+	Find a file:
+Read each page of the first block until a 0xFF flag is encountered past the first page
+Pages with 0x00 flag are deleted
+
+	Open file:
+
+
