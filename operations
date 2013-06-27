@@ -29,7 +29,14 @@ File block (ID 0x02):
 		The last chunk must indicate the next block in the upper 2 bytes of MD1. If the value is 0, nothing could be allocated.
 	All chunks:
 		The lower two bytes of MD1 indicate the number of data bytes in the chunk. A value of 0xFFFF is invalid...
-		
+
+Block age table (ID 0x03):
+	Each chunk contains a list of allocated blocks and their age (number of allocations). They are stored sequentially as pairs of 2-byte block ID and a 3-byte count of times the block has been allocated.
+	The first chunk starts with a 4-byte count of the sequence in the chain of block age tables
+	For each chunk, bytes 2-3 of protected spare indicate the number of entries present in the chunk.
+	In the last chunk, bytes 0-1 of the protected space indicate the address of the next block to use
+	
+	
 
 Block status markers (First byte of MD2 in first chunk):
 	0xFF: Unused, unallocated, completely nothing
@@ -91,6 +98,11 @@ Searching for a free block:
 		If you find one, use it (if not in bad block list...).
 		Otherwise... scan for the 'delete me' block with the lowest allocation sequence number
 			If none found, fail and abort.
+
+	On Disk:
+		Log of block allocations -- 2 byte identifier + 3 byte "age"
+	RAM:
+	
 
 Computing free space (approx):
 	1. Count number of blocks with type ID of 0xF or a 'delete me' flag
@@ -154,13 +166,12 @@ Byte 4
 
 
 
-
-
-
 	Find a file:
 Read each page of the first block until a 0xFF flag is encountered past the first page
 Pages with 0x00 flag are deleted
 
 	Open file:
+
+
 
 
