@@ -1,30 +1,127 @@
+/*
+Copyright (c) 2013, Ben Nahill <bnahill@gmail.com>
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+The views and conclusions contained in the software and documentation are those
+of the authors and should not be interpreted as representing official policies,
+either expressed or implied, of the FLogFS Project.
+*/
+
+/*!
+ * @file flogfs.c
+ * @author Ben Nahill <bnahill@gmail.com>
+ * @ingroup FLogFS
+ * @brief Core file system implementation
+ */
+
 #include "flogfs_private.h"
+#include "flogfs.h"
 
 #include <string.h>
 
+#ifndef IS_DOXYGEN
+#if !FLOG_BUILD_CPP
+#ifdef __cplusplus
+extern "C" {
+#endif
+#endif
+#endif
+
+//! @addtogroup FLogPrivate
+//! @{
+
+
 typedef struct {
-	flog_read_file_t * read_head;   //!< The head of the list of read files
-	flog_write_file_t * write_head; //!< The head of the list of write files
+	flog_block_idx_t block;
+	flog_block_age_t age;
+} flog_block_alloc_t;
+
+typedef struct {
+	//! Block indices and ages
+	flog_block_alloc_t blocks[FS_PREALLOCATE_SIZE];
+	//! The number of entries
+	uint16_t n;
+	//! The sum of all ages
+	flog_block_age_t age_sum;
+} flog_prealloc_list_t;
+
+typedef struct {
+	flog_block_alloc_t block;
+	flog_write_file_t * file;
+} flog_dirty_block_t;
+
+/*!
+ @brief The complete FLogFS state structure
+ */
+typedef struct {
+	//! The head of the list of read files
+	flog_read_file_t * read_head;
+	//! The head of the list of write files
+	flog_write_file_t * write_head;
+	//! The maximum file ID active in the system
 	uint32_t max_file_id;
-	uint32_t max_block_sequence;
-	uint16_t first_age_table_block;
-	uint16_t first_file_table_block;
+
+	//! The state of the file system
 	flog_state_t state;
+
+	//! The average block age in the file system
+	uint32_t mean_block_age;
 	
+	//! A list of preallocated blocks for quick access
+	flog_prealloc_list_t prealloc;
+	
+	//! The most recent timestamp (sequence number)
 	flog_timestamp_t t;
 	
+	//! The location of the first inode block
 	flog_block_idx_t inode0;
+	//! The number of files in the system
 	flog_file_id_t   num_files;
+	//! The number of free blocks
 	flog_block_idx_t num_free_blocks;
 	
+	//! @name Flash cache status
+	//! @{
 	flog_block_idx_t current_open_block;
 	uint16_t         current_open_page;
 	uint_fast8_t     page_open;
 	flog_result_t    page_open_result;
+	//! @}
 	
-	fs_lock_t lock; //!< A lock to serialize some FS operations
+	//! A lock to serialize some FS operations
+	fs_lock_t lock;
+	//! A lock to block any allocation-related operations
+	fs_lock_t allocate_lock;
+	//! The one dirty_block
+	//! @note This may only be accessed under @ref allocate_lock
+	flog_dirty_block_t dirty_block;
+	//! The moving allocator head
+	flog_block_idx_t allocate_head;
 } flogfs_t;
 
+/*!
+ * @brief A structure for iterating through inode table elements
+ */
 typedef struct {
 	flog_block_idx_t block;
 	flog_block_idx_t next_block;
@@ -32,48 +129,31 @@ typedef struct {
 	uint16_t sector;
 } flog_inode_iterator_t;
 
-typedef struct {
-	uint16_t block;
-	uint16_t seq;
-} flog_age_entry_t;
-
-typedef struct {
-	uint8_t header[6];
-	uint8_t major_vsn;
-	uint8_t minor_vsn;
-	uint32_t sequence;
-} flog_header_t;
-
-typedef struct {
-	uint32_t block_seq;
-	uint32_t file_id;
-	uint32_t file_block_seq;
-} flog_file_tag_t;
-
-typedef struct {
-	flog_file_tag_t tag;
-	char filename[FLOG_MAX_FNAME_LEN];
-} flog_file_header_t;
-
+//! A single static instance
 static flogfs_t flogfs;
 
-static uint8_t const fs_header_buffer[12] = {
-	0x00, 0x00, 0x00, 0x00,
-	0xBE, 0xEF, FLOG_VSN_MAJOR, FLOG_VSN_MINOR,
-	0x00, 0x00, 0x00, 0x00
-};
+static inline void flog_lock_fs(){fs_lock(&flogfs.lock);}
+static inline void flog_unlock_fs(){fs_unlock(&flogfs.lock);}
 
-#if !FLOG_BUILD_CPP
-#ifdef __cplusplus
-extern "C" {
-#endif
-#endif
+static inline void flog_lock_allocate(){fs_lock(&flogfs.allocate_lock);}
+static inline void flog_unlock_allocate(){fs_unlock(&flogfs.allocate_lock);}
 
 
-//! @addtogroup Private
-//! @{
+/*!
+ @brief Go find a suitable free block to erase
+ @return A block. The index will be FLOG_BLOCK_IDX_INVALID if invalid.
 
-static uint16_t flog_allocate_block();
+ This attempts to claim a block from the block preallocation list and searches
+ for a new one of the list is empty
+ */
+static flog_block_alloc_t flog_allocate_block();
+
+/*!
+ @brief Iterate the block allocation routine and return the result
+ */
+static flog_block_alloc_t flog_allocate_block_iterate();
+
+static inline void flog_prealloc_iterate();
 
 static inline flog_result_t flog_open_page(uint16_t block, uint16_t page);
 
@@ -85,8 +165,178 @@ static inline flog_result_t flog_open_page(uint16_t block, uint16_t page);
 static inline flog_result_t flog_open_sector(uint16_t block, uint16_t sector);
 
 
-static inline void flog_close_sector();
+/*!
+ @brief Initialize an inode iterator
+ @param[in,out] iter The iterator structure
+ @param[in] inode0 The first inode block to use
+ */
+static void flog_inode_iterator_init(flog_inode_iterator_t * iter,
+                                     flog_block_idx_t inode0);
+
+/*!
+ @brief Advance an inode iterator to the next entry
+ @param[in,out] iter The iterator structure
+ */
+static void flog_inode_iterator_next(flog_inode_iterator_t * iter);
+
+/*!
+ @brief Get the value of the next sector in sequence
+ @param sector The previous sector
+ @return Next sector
+
+ Sectors are written and read out of order so this is used to get the correct
+ sequence
+ */
+static inline uint16_t flog_increment_sector(uint16_t sector);
+
+/*!
+ @brief Add a free block candidate to the preallocation list
+
+ @note This requires the allocation lock
+ */
+static void flog_prealloc_push(flog_block_idx_t block,
+                               flog_block_age_t age);
+
+/*!
+ @brief Take the youngest block from the preallocation list
+ @retval Index The allocated block index
+ @retval FLOG_BLOCK_IDX_INVALID if empty
+
+ @note This requires the allocation lock
+ */
+static flog_block_alloc_t flog_prealloc_pop();
+
+
 //! @}
+
+///////////////////////////////////////////////////////////////////////////////
+// Static implementations
+///////////////////////////////////////////////////////////////////////////////
+
+static inline void flog_prealloc_iterate() {
+	flog_block_alloc_t block;
+	block = flog_allocate_block_iterate();
+	flog_prealloc_push(block.block, block.age);
+}
+
+
+static flog_block_alloc_t flog_allocate_block_iterate(){
+	flog_block_alloc_t block;
+	union {
+		uint8_t sector0_buffer;
+		flog_universal_sector0_header_t universal_sector0_header;
+	};
+
+	union {
+		uint8_t invalidation_buffer;
+		flog_universal_invalidation_header_t universal_invalidation_header;
+	};
+
+	block.block = FLOG_BLOCK_IDX_INVALID;
+
+	flog_lock_fs();
+	flog_lock_allocate();
+
+	// TODO: First check if this block is active in the FS
+
+	// First check if there is data
+	flog_open_sector(flogfs.allocate_head, 0);
+	flash_read_sector(&sector0_buffer, 0, 0,
+	                  sizeof(flog_universal_sector0_header_t));
+	if(universal_sector0_header.age == -1){
+		// Never been allocated!
+		block.block = flogfs.allocate_head;
+		block.age = 0;
+	} else {
+		// Check if the block is free
+		flog_open_sector(flogfs.allocate_head, FLOG_FILE_INVALIDATION_SECTOR);
+		flash_read_sector(&invalidation_buffer, FLOG_FILE_INVALIDATION_SECTOR,
+		                  0, sizeof(flog_universal_invalidation_header_t));
+		if(universal_invalidation_header.timestamp != FLOG_TIMESTAMP_INVALID){
+			// This has been invalidated
+			block.age = universal_sector0_header.age;
+			block.block = flogfs.allocate_head;
+		}
+	}
+
+	// Move the head
+	flogfs.allocate_head = (flogfs.allocate_head + 1) % FS_NUM_BLOCKS;
+
+	flog_unlock_allocate();
+	flog_unlock_fs();
+
+	return block;
+}
+
+static void flog_prealloc_push(flog_block_idx_t block,
+                               flog_block_age_t age){
+	flog_lock_allocate();
+	if(flogfs.prealloc.n == 0){
+		flogfs.prealloc.blocks[0].block = block;
+		flogfs.prealloc.blocks[0].age = age;
+		flogfs.prealloc.n = 1;
+		flogfs.prealloc.age_sum += age;
+		flog_unlock_allocate();
+		return;
+	}
+
+	if((flogfs.prealloc.n == FS_PREALLOCATE_SIZE) &&
+	   (flogfs.prealloc.blocks[flogfs.prealloc.n - 1].age < age)){
+		// This block sucks
+		flog_unlock_allocate();
+		return;
+	}
+	for(flog_block_idx_t i = flogfs.prealloc.n - 1; i; i--){
+		// Search for the right place (start at end)
+		if(age <= flogfs.prealloc.blocks[i].age){
+			if(flogfs.prealloc.n == FS_PREALLOCATE_SIZE){
+				// Last block will be discarded
+				flogfs.prealloc.age_sum -=
+				  flogfs.prealloc.blocks[FS_PREALLOCATE_SIZE - 1].age;
+			}
+			for(flog_block_idx_t j = MIN(flogfs.prealloc.n,
+			                             FS_PREALLOCATE_SIZE - 1);
+			    j > i; j--){
+				// Shift all older blocks
+				flogfs.prealloc.blocks[j].age =
+				   flogfs.prealloc.blocks[j - 1].age;
+				flogfs.prealloc.blocks[j].block =
+				   flogfs.prealloc.blocks[j - 1].block;
+			}
+			if(flogfs.prealloc.n < FS_PREALLOCATE_SIZE){
+				flogfs.prealloc.n += 1;
+			}
+			flogfs.prealloc.blocks[i].age = age;
+			flogfs.prealloc.blocks[i].block = block;
+
+			flogfs.prealloc.age_sum += age;
+			flog_unlock_allocate();
+			return;
+		}
+	}
+	flog_unlock_allocate();
+}
+
+static flog_block_alloc_t flog_prealloc_pop() {
+	flog_block_alloc_t block;
+	flog_lock_allocate();
+	if(flogfs.prealloc.n == 0){
+		flog_unlock_allocate();
+		block.block = FLOG_BLOCK_IDX_INVALID;
+		return block;
+	}
+	block.block = flogfs.prealloc.blocks[0].block;
+	block.age = flogfs.prealloc.blocks[0].age;
+
+	// Shift all of the other entries forward
+	flogfs.prealloc.n -= 1;
+	for(flog_block_idx_t i = 0; i < flogfs.prealloc.n; i++){
+		flogfs.prealloc.blocks[i].age = flogfs.prealloc.blocks[i + 1].age;
+		flogfs.prealloc.blocks[i].block = flogfs.prealloc.blocks[i + 1].block;
+	}
+	flog_unlock_allocate();
+	return block;
+}
 
 static inline flog_result_t flog_open_page(uint16_t block, uint16_t page){
 	if(flogfs.page_open &&
@@ -98,6 +348,7 @@ static inline flog_result_t flog_open_page(uint16_t block, uint16_t page){
 	flogfs.page_open = 1;
 	flogfs.current_open_block = block;
 	flogfs.current_open_page = page;
+
 	return flogfs.page_open_result;
 }
 
@@ -132,11 +383,54 @@ static void flog_inode_iterator_next(flog_inode_iterator_t * iter){
 	}
 }
 
+static flog_block_alloc_t flog_allocate_block(){
+	flog_block_alloc_t block;
+
+	flog_lock_allocate();
+	if(flogfs.num_free_blocks == 0){
+		// No free blocks in the system. GTFO.
+		block.block = FLOG_BLOCK_IDX_INVALID;
+		flog_unlock_allocate();
+		return block;
+	}
+
+	block = flog_prealloc_pop();
+	if(block.block != FLOG_BLOCK_IDX_INVALID){
+		// Got a block! Yahtzee!
+		flog_unlock_allocate();
+		return block;
+	}
+	// Preallocate is empty
+	// Go search for another
+	for(flog_block_idx_t i = FS_NUM_BLOCKS; i; i--){
+		block = flog_allocate_block_iterate();
+		if(block.block != FLOG_BLOCK_IDX_INVALID){
+			// Found a block
+			// TODO: mark this as the current dirty block
+		}
+	}
+	flog_unlock_allocate();
+}
+
+static inline uint16_t flog_increment_sector(uint16_t sector){
+	switch(sector){
+	case FLOG_FILE_TAIL_SECTOR - 1:
+		return FS_SECTORS_PER_PAGE;
+	case FS_PAGES_PER_BLOCK * FS_SECTORS_PER_PAGE - 1:
+		return FLOG_FILE_TAIL_SECTOR;
+	default:
+		return sector + 1;
+	}
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Public implementations
+///////////////////////////////////////////////////////////////////////////////
 
 flog_result_t flogfs_init(){
 	flogfs.state = FLOG_STATE_RESET;
 	flogfs.max_file_id = 0;
-	flogfs.max_block_sequence = 0;
+	flogfs.t = 0;
 	flogfs.page_open = 0;
 		
 	flogfs.max_file_id = 0;
@@ -150,14 +444,13 @@ flog_result_t flogfs_format(){
 		flog_inode_sector0_t main_buffer;
 		flog_inode_sector0_spare_t spare_buffer;
 	};
-	
-	fs_lock(&flogfs.lock);
+	flog_lock_fs();
 	
 	for(i = 0; i < FS_NUM_BLOCKS; i++){
 		flash_open_page(i, 0);
 		if(!flash_block_is_bad()){
 			if(FLOG_FAILURE == flash_erase_block(i)){
-				fs_unlock(&flogfs.lock);
+				flog_unlock_fs();
 				flash_unlock();
 				return FLOG_FAILURE;
 			}
@@ -176,16 +469,14 @@ flog_result_t flogfs_format(){
 	flash_commit();
 	flash_close_page();
 	
-	fs_unlock(&flogfs.lock);
-	
+	flog_unlock_fs();
 	flash_unlock();
 	return FLOG_SUCCESS;
 }
 
 flog_result_t flogfs_mount(){
-	uint8_t buffer[32];
-	uint32_t i, j, done_scanning;
-	uint16_t block, page, sector;
+	uint32_t i, done_scanning;
+	uint16_t block;
 	
 	////////////////////////////////////////////////////////////
 	// Data structures
@@ -272,7 +563,7 @@ flog_result_t flogfs_mount(){
 	// Claim the disk and get this show started
 	////////////////////////////////////////////////////////////
 	
-	fs_lock(&flogfs.lock);
+	flog_lock_fs();
 	flash_lock();
 	
 	////////////////////////////////////////////////////////////
@@ -442,7 +733,8 @@ flog_result_t flogfs_mount(){
 	// Verify the completion of the most recent deletion operation
 	if(last_deletion.timestamp > 0){
 		flog_open_sector(last_deletion.last_block, 0);
-		flash_read_sector(&sector0_buffer, 0, 0, sizeof(flog_file_header_t));
+		flash_read_sector(&sector0_buffer, 0, 0,
+		                  sizeof(flog_file_sector0_header_t));
 		if(file_sector0_header.file_id == last_deletion.file_id){
 			// This is the same file still, see if it's been invalidated
 			flog_open_sector(last_deletion.last_block,
@@ -452,24 +744,25 @@ flog_result_t flogfs_mount(){
 			if(file_invalidation_sector.timestamp != FLOG_TIMESTAMP_INVALID){
 				// Crap, this never got invalidated correctly
 				// TODO: Actually go and invalidate the chain now
-				flash_debug_error("Found a file that wasn't completely deleted");
+				flash_debug_error("FLog ERR 1");
 				goto failure;
 			}
 		}
 	}
 	
 	flash_unlock();
-	fs_unlock(&flogfs.lock);
+	flog_unlock_fs();
 	return FLOG_SUCCESS;
 
 failure:
 	flash_unlock();
-	fs_unlock(&flogfs.lock);
+	flog_unlock_fs();
 	return FLOG_FAILURE;
 }
 
 flog_result_t flogfs_open_read(flog_read_file_t * file, char const * filename){
 	flog_inode_iterator_t inode_iter;
+	flog_read_file_t * file_iter;
 	
 	union {
 		uint8_t sector_buffer;;
@@ -485,9 +778,13 @@ flog_result_t flogfs_open_read(flog_read_file_t * file, char const * filename){
 		return FLOG_FAILURE;
 	}
 	
-	fs_lock(&flogfs.lock);
+	flog_lock_fs();
 	for(flog_inode_iterator_init(&inode_iter, flogfs.inode0);;
 		flog_inode_iterator_next(&inode_iter)){
+
+		/////////////
+		// Inode search
+		/////////////
 		
 		// Check if the entry is valid
 		flog_open_sector(inode_iter.block, inode_iter.sector);
@@ -520,6 +817,10 @@ flog_result_t flogfs_open_read(flog_read_file_t * file, char const * filename){
 			continue;
 		}
 		
+		/////////////
+		// Actual file search
+		/////////////
+		
 		
 		// Now go find the start of file data (either first or second sector)
 		// and adjust some settings
@@ -538,58 +839,159 @@ flog_result_t flogfs_open_read(flog_read_file_t * file, char const * filename){
 			file->offset = 0;
 		}
 		
-		file->nbytes_in_sector = file_sector_spare.nbytes;
+		file->sector_remaining_bytes = file_sector_spare.nbytes;
 		
 		// If we got this far...
-		break;
+
+		// Add to list of read files
+		file->next = 0;
+		if(flogfs.read_head){
+			// Iterate to end of list
+			for(file_iter = flogfs.read_head; file_iter->next;
+			    file_iter = file_iter->next);
+			file_iter->next = file;
+		} else {
+			flogfs.read_head = file;
+		}
+
+		flash_unlock();
+		flog_unlock_fs();
+		return FLOG_SUCCESS;
 	}
-	
-	// TODO: Add item to 'open file' list
-	
+
+
 failure:
 	flash_unlock();
-	fs_unlock(&flogfs.lock);
+	flog_unlock_fs();
 	return FLOG_FAILURE;
 }
 
+flog_result_t flogfs_close_read(flog_read_file_t * file){
+
+}
+
+uint32_t flogfs_read(flog_read_file_t * file, uint8_t * dst, uint32_t nbytes){
+	uint32_t count = 0;
+	uint16_t start;
+	uint16_t to_read;
+
+	flog_block_idx_t block;
+	uint16_t sector;
+
+	union {
+		uint8_t sector_header;
+		flog_file_tail_sector_header_t file_tail_sector_header;
+		flog_file_sector0_header_t file_sector0_header;
+	};
+
+	union {
+		uint8_t sector_spare;
+		flog_file_sector_spare_t file_sector_spare;
+	};
+
+	flog_lock_fs();
+	flash_lock();
+
+	while(nbytes){
+		if(file->sector_remaining_bytes == 0){
+			// We are/were at the end of file, look into the existence of new data
+			// This block is responsible for setting:
+			// -- file->sector_remaining_bytes
+			// -- file->offset
+			// -- file->sector
+			// -- file->block
+			// and bailing on the loop if EOF is encountered
+			if(file->sector == FLOG_FILE_TAIL_SECTOR){
+				// This was the last sector in the block, check the next
+				flog_open_sector(file->block, FLOG_FILE_TAIL_SECTOR);
+				flash_read_sector(&sector_header, FLOG_FILE_TAIL_SECTOR, 0,
+								sizeof(flog_file_tail_sector_header_t));
+				block = file_tail_sector_header.next_block;
+				// Now check out that new block and make sure it's legit
+				flog_open_sector(block, 0);
+				flash_read_sector(&sector_header, 0, 0,
+								sizeof(flog_file_sector0_header_t));
+				if(file_sector0_header.file_id != file->id){
+					// This next block hasn't been written. EOF for now
+					goto done;
+				}
+
+				file->block = block;
+
+				flash_read_spare(&sector_spare, 0);
+				if(file_sector_spare.nbytes == 0){
+					// It's possible for the first sector to have 0 bytes
+					// Data is in next sector
+					file->sector = 1;
+				} else {
+					file->sector = 0;
+				}
+			} else {
+				// Increment to next sector but don't necessarily update file
+				// state
+				sector = flog_increment_sector(file->sector);
+
+				flog_open_sector(file->block, sector);
+				flash_read_spare(&sector_spare, sector);
+
+				if(file_sector_spare.nbytes == -1){
+					// We're looking at an empty sector, GTFO
+					goto done;
+				} else {
+					file->sector = sector;
+				}
+			}
+
+			file->sector_remaining_bytes = file_sector_spare.nbytes;
+			switch(file->sector){
+			case FLOG_FILE_TAIL_SECTOR:
+				file->offset = sizeof(flog_file_tail_sector_header_t);
+				break;
+			case 0:
+				file->offset = sizeof(flog_file_sector0_header_t);
+				break;
+			default:
+				file->offset = 0;
+			}
+		}
+
+		// Figure out how many to read
+		to_read = MIN(nbytes, file->sector_remaining_bytes);
+
+		// Read this sector now
+		flog_open_sector(file->block, file->sector);
+		flash_read_sector(dst, file->sector, file->offset, to_read);
+		count += to_read;
+		nbytes -= to_read;
+		dst += to_read;
+		// Update file stats
+		file->offset += to_read;
+		file->sector_remaining_bytes -= to_read;
+		file->read_head += to_read;
+	}
+
+
+done:
+	flash_unlock();
+	flog_unlock_fs();
+
+	return count;
+}
+
+flog_result_t flogfs_seek(flog_read_file_t * file, uint32_t index){
+
+}
 
 
 flog_result_t flogfs_open_write(flog_write_file_t * file, char const * filename){
 
 }
 
-static uint32_t flog_get_block_age(uint16_t block){
 
-}
-
-/*!
- @brief Search for a free (completely unallocated) block
- 
- @return The ID of the free block, FS_NUM_BLOCKS if none
- */
-static uint16_t flog_find_free_block(){
-
-}
-
-/*!
- @brief Allocate an available block
- 
- 1. Check list of completely unused blocks
-	These are blocks of minimum age. Use them first
- 2. Iterate through block age table. The block of minimum age should be used
- */
-static uint16_t flog_allocate_block() {
-
-}
-
-static uint16_t flog_pick_start_point() {
-	return 0;
-}
-
-
-
+#ifndef IS_DOXYGEN
 #if !FLOG_BUILD_CPP
 #ifdef __cplusplus
 };
+#endif
 #endif
 #endif
