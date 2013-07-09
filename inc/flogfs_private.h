@@ -33,6 +33,8 @@ either expressed or implied, of the FLogFS Project.
  *
  * @ingroup FLogFS
  *
+ * @brief Private definitions for FLogFS internals
+ *
  */
 
 #ifndef __FLOGFS_PRIVATE_H_
@@ -40,6 +42,24 @@ either expressed or implied, of the FLogFS Project.
 
 #include "flogfs.h"
 #include "flogfs_conf.h"
+
+// KDevelop wants to be a jerk about the __restrict__ keyword
+// #ifdef USE_RESTRICT
+// 	#if defined(__GNUG__)
+// 	#define restrict __restrict__
+// 	#elif defined(__GNUC__)
+// 	#define restrict restrict
+// 	#else
+// 	#define restrict
+// 	#endif
+// #else
+// 	#if not defined(__cplusplus)
+// 	#define restrict restrict
+// 	#else
+// 	#define restrict
+// 	#endif
+// #endif
+
 
 #define MAX(a,b) ((a > b) ? a : b)
 #define MIN(a,b) ((a > b) ? b : a)
@@ -50,8 +70,7 @@ either expressed or implied, of the FLogFS Project.
 
 typedef enum {
 	FLOG_STATE_RESET,
-	FLOG_STATE_MOUNTED,
-	FLOG_STATE_EDIBLE
+	FLOG_STATE_MOUNTED
 } flog_state_t;
 
 /*!
@@ -78,6 +97,7 @@ typedef uint16_t inode_index_t;
 //! @name Invalid values
 //! @{
 #define FLOG_BLOCK_IDX_INVALID ((flog_block_idx_t)(-1))
+#define FLOG_BLOCK_AGE_INVALID ((flog_block_age_t)(-1))
 #define FLOG_FILE_ID_INVALID   ((flog_file_id_t)(-1))
 #define FLOG_TIMESTAMP_INVALID ((flog_timestamp_t)(-1))
 //! @}
@@ -161,6 +181,7 @@ typedef struct {
 	flog_block_idx_t next_block;
 	flog_block_age_t next_age;
 	flog_timestamp_t timestamp;
+	uint16_t bytes_in_block;
 } flog_file_tail_sector_header_t;
 
 typedef struct {

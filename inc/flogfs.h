@@ -27,12 +27,14 @@ of the authors and should not be interpreted as representing official policies,
 either expressed or implied, of the FLogFS Project.
 */
 
+
 /*!
  * @file flogfs.h
  * @author Ben Nahill <bnahill@gmail.com>
  *
  * @ingroup FLogFS
  *
+ * @brief Public interface for FLogFS
  */
 
 #ifndef __FLOGFS_H_
@@ -59,6 +61,8 @@ either expressed or implied, of the FLogFS Project.
 //! The maximum file name length allowed
 #define FLOG_MAX_FNAME_LEN     (32)
 //! @}
+
+#include "flogfs_conf.h"
 
 
 #if !FLOG_BUILD_CPP
@@ -107,12 +111,22 @@ typedef struct flog_read_file_t {
 } flog_read_file_t;
 
 typedef struct flog_write_file_t {
-	uint32_t write_head; //!< Offset of write head from start of file
-	uint16_t write_block; //! Block index of write head
-	uint16_t write_chunk; //! Chunk index of write head
-	uint16_t write_index; //! Write index of current chunk
-	
+	//! Offset of write head from start of file
+	uint32_t write_head;
+	//! Block index of write head
+	uint16_t block;
+	//! Sector index of write head
+	uint16_t sector;
+	//! Index of write header insider current sector
+	uint16_t offset;
+	//! The number of bytes remaining in the sector before forcing a cache flush
+	uint16_t sector_remaining_bytes;
+	//! Bytes in block (so far)
+	uint16_t bytes_in_block;
+	uint32_t block_age;
 	uint32_t id;
+
+	uint8_t sector_buffer[FS_SECTOR_SIZE];
 	
 	struct flog_write_file_t * next;
 } flog_write_file_t;
@@ -139,6 +153,11 @@ flog_result_t flogfs_open_write(flog_write_file_t * file, char const * filename)
 flog_result_t flogfs_close_read(flog_read_file_t * file);
 
 flog_result_t flogfs_close_write(flog_write_file_t * file);
+
+uint32_t flogfs_read(flog_read_file_t * file, uint8_t * dst, uint32_t nbytes);
+
+uint32_t flogfs_write(flog_write_file_t * file, uint8_t const * src,
+                      uint32_t nbytes);
 
 #if !FLOG_BUILD_CPP
 #ifdef __cplusplus
