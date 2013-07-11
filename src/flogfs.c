@@ -98,6 +98,8 @@ typedef struct {
 	flog_prealloc_list_t prealloc;
 	
 	//! The most recent timestamp (sequence number)
+	//! @note To put a stamp on a new operation, you should preincrement. This
+	//! is the timestamp of the most recent operation
 	flog_timestamp_t t;
 	
 	//! The location of the first inode block
@@ -127,22 +129,7 @@ typedef struct {
 	flog_block_idx_t allocate_head;
 } flogfs_t;
 
-/*!
- * @brief A structure for iterating through inode table elements
- */
-typedef struct {
-	//! The current block
-	flog_block_idx_t block;
-	//! The next block so as to avoid re-reading the header
-	flog_block_idx_t next_block;
-	//! The index of the current inode entry -- relative to start point
-	uint16_t inode_idx;
-	//! The index of the current inode block -- absolute
-	uint16_t inode_block_idx;
-	//! The current sector -- If this is
-	//! FS_SECTORS_PER_PAGE * FS_PAGES_PER_BLOCK, at end of block
-	uint16_t sector;
-} flog_inode_iterator_t;
+
 
 //! A single static instance
 static flogfs_t flogfs;
@@ -180,12 +167,6 @@ static flog_block_alloc_t flog_allocate_block_iterate();
 static inline flog_block_idx_t
 flog_universal_get_next_block(flog_block_idx_t block);
 
-/*!
- @brief Check to see if this is the end of an inode block for which there isn't
- a successor.
- */
-static inline uint_fast8_t
-flog_inode_iterator_at_end_of_block(flog_inode_iterator_t const * iter);
 
 /*!
  @brief Perform an iteration of the preallocator. Basically check one block as
@@ -232,16 +213,21 @@ static void flog_inode_iterator_init(flog_inode_iterator_t * iter,
  @brief Advance an inode iterator to the next entry
  @param[in,out] iter The iterator structure
 
- If the next entry is in a yet-to-be-allocated block, it will NOT be allocated
- yet.
+ This doesn't deal with any allocation. That is done with
+ flog_inode_prepare_new.
+
+ @warning You MUST check on every iteration for the validity of the entry and
+ not iterate past an unallocated entry.
  */
 static void flog_inode_iterator_next(flog_inode_iterator_t * iter);
 
 /*!
- @brief Prepare a new inode entry for use
+ @brief Claim a new inode entry as your own.
 
  @note This requires the @ref flogfs_t::allocate_lock. It might allocate
  something.
+
+ @warning Please be sure that iter points to the first unallocated entry
  */
 static flog_result_t flog_inode_prepare_new(flog_inode_iterator_t * iter);
 
@@ -401,6 +387,7 @@ flog_result_t flogfs_mount(){
 		flog_file_sector_spare_t file_spare0;
 	};
 	
+
 	
 	////////////////////////////////////////////////////////////
 	// Initialize data structures
@@ -426,7 +413,14 @@ flog_result_t flogfs_mount(){
 	////////////////////////////////////////////////////////////
 	
 	flog_lock_fs();
+
+	if(flogfs.state == FLOG_STATE_MOUNTED){
+		flog_unlock_fs();
+		return FLOG_SUCCESS;
+	}
+
 	flash_lock();
+
 	
 	////////////////////////////////////////////////////////////
 	// First, iterate through all blocks to find:
@@ -501,7 +495,7 @@ flog_result_t flogfs_mount(){
 	}
 	
 	if(inode0_idx == FLOG_BLOCK_IDX_INVALID){
-		flash_debug_error("Inode 0 not found!");
+		flash_debug_error("FLogFS:" LINESTR);
 		goto failure;
 	}
 	
@@ -516,10 +510,6 @@ flog_result_t flogfs_mount(){
 	block = inode0_idx; // Inode block
 	for(flog_inode_iterator_init(&inode_iter, inode0_idx);;
 		flog_inode_iterator_next(&inode_iter)){
-		if(flog_inode_iterator_at_end_of_block(&inode_iter)){
-			// No more entries to look at
-			break;
-		}
 		flog_open_sector(inode_iter.block, inode_iter.sector);
 		flash_read_sector(&sector_buffer, inode_iter.sector, 0,
 		                  sizeof(flog_inode_file_allocation_header_t));
@@ -610,7 +600,7 @@ flog_result_t flogfs_mount(){
 			if(file_invalidation_sector.timestamp != FLOG_TIMESTAMP_INVALID){
 				// Crap, this never got invalidated correctly
 				flog_invalidate_chain(last_deletion.first_block);
-				flash_debug_warn("FLog WARN 1");
+				flash_debug_warn("FLogFS:" LINESTR);
 			}
 		}
 	}
@@ -1231,6 +1221,57 @@ failure:
 	return FLOG_FAILURE;
 }
 
+
+
+
+
+void flogfs_start_ls(flog_ls_iterator_t * iter){
+	// TODO: Lock something?
+
+	flog_inode_iterator_init(iter, flogfs.inode0);
+}
+
+uint_fast8_t flogfs_ls_iterate(flog_ls_iterator_t * iter, char * fname_dst){
+	union {
+		uint8_t sector_buffer;
+		flog_file_id_t file_id;
+		flog_timestamp_t timestamp;
+	};
+	while(1){
+		flog_open_sector(iter->block, iter->sector);
+		flash_read_sector(&sector_buffer, iter->sector,
+		                  0, sizeof(flog_file_id_t));
+		if(file_id == FLOG_FILE_ID_INVALID){
+			// Nothing here. Done.
+			return 0;
+		}
+		// Now check to see if it's valid
+		flog_open_sector(iter->block, iter->sector + 1);
+		flash_read_sector(&sector_buffer, iter->sector+1,
+		                  0, sizeof(flog_timestamp_t));
+		if(timestamp == FLOG_TIMESTAMP_INVALID){
+			// This file's good
+			// Now check to see if it's valid
+			// Go read the filename
+			flog_open_sector(iter->block, iter->sector);
+			flash_read_sector((uint8_t *)fname_dst, iter->sector,
+			                  sizeof(flog_inode_file_allocation_header_t),
+							  FLOG_MAX_FNAME_LEN);
+			fname_dst[FLOG_MAX_FNAME_LEN-1] = '\0';
+			flog_inode_iterator_next(iter);
+			return 1;
+		} else {
+			flog_inode_iterator_next(iter);
+		}
+	}
+}
+
+void flogfs_stop_ls(flog_ls_iterator_t * iter){
+	// TODO: Unlock something?
+}
+
+
+
 ///////////////////////////////////////////////////////////////////////////////
 // Static implementations
 ///////////////////////////////////////////////////////////////////////////////
@@ -1392,10 +1433,6 @@ flog_universal_get_next_block(flog_block_idx_t block){
 	return block;
 }
 
-static inline uint_fast8_t
-flog_inode_iterator_at_end_of_block(flog_inode_iterator_t const * iter){
-	return (iter->sector == -1) ? 1 : 0;
-}
 
 static void flog_inode_iterator_init(flog_inode_iterator_t * iter,
                                      flog_block_idx_t inode0){
@@ -1442,7 +1479,11 @@ static void flog_inode_iterator_next(flog_inode_iterator_t * iter){
 			iter->sector = FS_SECTORS_PER_PAGE;
 		} else {
 			// The next doesn't exist
-			iter->sector = -1;
+			// WTF?
+			flash_debug_warn("FLogFS:" LINESTR);
+			// Don't do anything; this is dumb
+			iter->sector -= 2;
+			iter->sector -= 1;
 		}
 	}
 }
@@ -1455,8 +1496,14 @@ static flog_result_t flog_inode_prepare_new (flog_inode_iterator_t * iter) {
 		flog_inode_sector0_t inode_sector0;
 		flog_inode_sector0_spare_t inode_sector0_spare;
 	};
-	if(iter->sector == FS_SECTORS_PER_PAGE){
-		// We are at the end of an inode block
+	if(iter->sector == FS_SECTORS_PER_PAGE - 2){
+		if(iter->next_block != FLOG_BLOCK_IDX_INVALID){
+			flash_debug_warn("FLogFS:" LINESTR);
+		}
+
+		// We are at the last entry of the inode block
+		// This entry is valid and will be used but now is the time to allocate
+		// the next block
 		block_alloc = flog_allocate_block();
 		if(block_alloc.block == FLOG_BLOCK_IDX_INVALID){
 			// Couldn't allocate a new block!
@@ -1485,10 +1532,7 @@ static flog_result_t flog_inode_prepare_new (flog_inode_iterator_t * iter) {
 		flash_write_spare(&sector_buffer, 0);
 		flash_commit();
 
-		iter->block = block_alloc.block;
-		iter->next_block = FLOG_BLOCK_IDX_INVALID;
-		// Sector is now just first in second page
-		iter->sector = FS_SECTORS_PER_PAGE;
+		iter->next_block = block_alloc.block;
 	}
 	// Otherwise this is a completely okay sector to use
 
@@ -1625,11 +1669,6 @@ static flog_file_find_result_t flog_find_file(char const * filename,
 		// Inode search
 		/////////////
 
-		if(flog_inode_iterator_at_end_of_block(iter)){
-			// No more entries to look at
-			goto failure;
-		}
-
 		// Check if the entry is valid
 		flog_open_sector(iter->block, iter->sector);
 		flash_read_sector(&sector_buffer, iter->sector, 0,
@@ -1640,7 +1679,7 @@ static flog_file_find_result_t flog_find_file(char const * filename,
 			// This file is the end.
 			// Do a quick check to make sure there are no foolish errors
 			if(iter->next_block != FLOG_BLOCK_IDX_INVALID){
-				flash_debug_warn("Found fake\ninode end");
+				flash_debug_warn("FLogFS:" LINESTR);
 			}
 			goto failure;
 		}
@@ -1672,7 +1711,6 @@ failure:
 	result.first_block = FLOG_BLOCK_IDX_INVALID;
 	return result;
 }
-
 
 #ifndef IS_DOXYGEN
 #if !FLOG_BUILD_CPP

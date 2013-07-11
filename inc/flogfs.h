@@ -83,6 +83,35 @@ typedef enum {
 	FLOG_FLASH_ERR_DETECT = -1
 } flog_flash_read_result_t;
 
+//! @name Type size definitions
+//! @{
+typedef uint32_t flog_timestamp_t;
+typedef uint16_t flog_block_idx_t;
+typedef uint32_t flog_block_age_t;
+typedef uint32_t flog_file_id_t;
+typedef uint16_t flog_sector_nbytes_t;
+typedef uint16_t inode_index_t;
+//! @}
+
+/*!
+ * @brief A structure for iterating through inode table elements
+ */
+typedef struct {
+	//! The current block
+	flog_block_idx_t block;
+	//! The next block so as to avoid re-reading the header
+	flog_block_idx_t next_block;
+	//! The index of the current inode entry -- relative to start point
+	uint16_t inode_idx;
+	//! The index of the current inode block -- absolute
+	uint16_t inode_block_idx;
+	//! The current sector -- If this is
+	//! FS_SECTORS_PER_PAGE * FS_PAGES_PER_BLOCK, at end of block
+	uint16_t sector;
+} flog_inode_iterator_t;
+
+typedef flog_inode_iterator_t flog_ls_iterator_t;
+
 #define FLOG_RESULT(x) ((x)?FLOG_SUCCESS:FLOG_FAILURE)
 
 /*!
@@ -214,6 +243,24 @@ uint32_t flogfs_read(flog_read_file_t * file, uint8_t * dst, uint32_t nbytes);
  */
 uint32_t flogfs_write(flog_write_file_t * file, uint8_t const * src,
                       uint32_t nbytes);
+
+/*!
+ @brief Start listing files (lock inode table)
+ */
+void flogfs_start_ls(flog_ls_iterator_t * iter);
+
+/*!
+ @brief Read another filename
+ @param[out] fname_dst A destination to copy the filename
+ @retval 1 Successful
+ @retval 0 This is the end of the data
+ */
+uint_fast8_t flogfs_ls_iterate(flog_ls_iterator_t * iter, char * fname_dst);
+
+/*!
+ @brief Unlock the inode table when done listing
+ */
+void flogfs_stop_ls(flog_ls_iterator_t * iter);
 
 #if !FLOG_BUILD_CPP
 #ifdef __cplusplus

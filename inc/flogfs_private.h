@@ -61,6 +61,11 @@ either expressed or implied, of the FLogFS Project.
 // #endif
 
 
+#define STRING2(x) #x
+#define STRING(x) STRING2(x)
+#define LINESTR STRING(__LINE__)
+
+
 #define MAX(a,b) ((a > b) ? a : b)
 #define MIN(a,b) ((a > b) ? b : a)
 
@@ -83,16 +88,6 @@ typedef enum {
 	FLOG_BLOCK_TYPE_INODE = 1,
 	FLOG_BLOCK_TYPE_FILE = 2
 } flog_block_type_t;
-
-//! @name Type size definitions
-//! @{
-typedef uint32_t flog_timestamp_t;
-typedef uint16_t flog_block_idx_t;
-typedef uint32_t flog_block_age_t;
-typedef uint32_t flog_file_id_t;
-typedef uint16_t flog_sector_nbytes_t;
-typedef uint16_t inode_index_t;
-//! @}
 
 //! @name Invalid values
 //! @{
