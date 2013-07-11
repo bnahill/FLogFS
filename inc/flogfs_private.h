@@ -205,10 +205,12 @@ typedef struct {
 
 //! @name Special sector indices
 //! @{
-#define FLOG_FILE_TAIL_SECTOR           (FS_SECTORS_PER_PAGE - 2)
-#define FLOG_FILE_INVALIDATION_SECTOR   (FS_SECTORS_PER_PAGE - 1)
-#define FLOG_INODE_TAIL_SECTOR          (FS_SECTORS_PER_PAGE - 2)
-#define FLOG_INODE_INVALIDATION_SECTOR  (FS_SECTORS_PER_PAGE - 1)
+typedef enum {
+	FLOG_FILE_TAIL_SECTOR          = (FS_SECTORS_PER_PAGE - 2),
+	FLOG_FILE_INVALIDATION_SECTOR  = (FS_SECTORS_PER_PAGE - 1),
+	FLOG_INODE_TAIL_SECTOR         = (FS_SECTORS_PER_PAGE - 2),
+	FLOG_INODE_INVALIDATION_SECTOR = (FS_SECTORS_PER_PAGE - 1)
+} flog_sector_special_idx_t;
 //! @}
 
 //! @} // FLogPrivate

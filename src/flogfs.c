@@ -169,6 +169,25 @@ static flog_block_alloc_t flog_allocate_block();
 static flog_block_alloc_t flog_allocate_block_iterate();
 
 /*!
+ @brief Get the next block entry from any valid block
+ @param block The previous block
+ @returns The next block
+
+ This is fine for both inode and file blocks
+
+ If block == FLOG_BLOCK_IDX_INVALID, it will be returned
+ */
+static inline flog_block_idx_t
+flog_universal_get_next_block(flog_block_idx_t block);
+
+/*!
+ @brief Check to see if this is the end of an inode block for which there isn't
+ a successor.
+ */
+static inline uint_fast8_t
+flog_inode_iterator_at_end_of_block(flog_inode_iterator_t const * iter);
+
+/*!
  @brief Perform an iteration of the preallocator. Basically check one block as
  a candidate.
 
@@ -212,6 +231,9 @@ static void flog_inode_iterator_init(flog_inode_iterator_t * iter,
 /*!
  @brief Advance an inode iterator to the next entry
  @param[in,out] iter The iterator structure
+
+ If the next entry is in a yet-to-be-allocated block, it will NOT be allocated
+ yet.
  */
 static void flog_inode_iterator_next(flog_inode_iterator_t * iter);
 
@@ -494,6 +516,10 @@ flog_result_t flogfs_mount(){
 	block = inode0_idx; // Inode block
 	for(flog_inode_iterator_init(&inode_iter, inode0_idx);;
 		flog_inode_iterator_next(&inode_iter)){
+		if(flog_inode_iterator_at_end_of_block(&inode_iter)){
+			// No more entries to look at
+			break;
+		}
 		flog_open_sector(inode_iter.block, inode_iter.sector);
 		flash_read_sector(&sector_buffer, inode_iter.sector, 0,
 		                  sizeof(flog_inode_file_allocation_header_t));
@@ -1064,6 +1090,12 @@ failure:
 	return FLOG_FAILURE;
 }
 
+/*!
+ @details
+ ### Internals
+ To close a write, all outstanding data must simply be flushed to flash. If any
+ blocks are newly-allocated, they must be committed.
+ */
 flog_result_t flogfs_close_write(flog_write_file_t * file){
 	union {
 		uint8_t * sector_buffer;
@@ -1080,8 +1112,12 @@ flog_result_t flogfs_close_write(flog_write_file_t * file){
 	sector_buffer = file->sector_buffer;
 
 	if(file->sector == 0){
-		// Write whatever it is
-
+		// Write whatever it is, data or no data
+		file_sector0_header->age = file->block_age;
+		file_sector0_header->file_id = file->id;
+		flog_open_sector(file->block, 0);
+		flash_write_sector(sector_buffer, 0, 0, file->offset);
+		flash_commit();
 	} else if(file->sector == FLOG_FILE_TAIL_SECTOR) {
 		// Write only if the offset is greater than the header size
 		// Also, allocate
@@ -1136,6 +1172,62 @@ failure:
 	flash_unlock();
 	flog_unlock_fs();
 
+	return FLOG_FAILURE;
+}
+
+flog_result_t flogfs_rm(char const * filename){
+	flog_file_find_result_t find_result;
+	flog_inode_iterator_t inode_iter;
+	flog_block_idx_t block, next_block;
+
+	union {
+		uint8_t sector_buffer;
+		flog_inode_file_invalidation_t invalidation_buffer;
+	};
+
+	flog_lock_fs();
+	flash_lock();
+
+	find_result = flog_find_file(filename, &inode_iter);
+
+	if(find_result.first_block == FLOG_BLOCK_IDX_INVALID){
+		// Cool! The file already doesn't exist.
+		// No work to be done here.
+		goto failure;
+	}
+
+	// Navigate to the end to find the last block
+	block = find_result.first_block;
+	while(1){
+		flog_open_sector(block, FLOG_FILE_TAIL_SECTOR);
+		flash_read_sector((uint8_t*)&next_block, FLOG_FILE_TAIL_SECTOR, 0,
+		                  sizeof(flog_block_idx_t));
+		if(next_block == FLOG_BLOCK_IDX_INVALID){
+			// THIS IS THE LAST BLOCK
+			break;
+		}
+		block = next_block;
+	}
+
+	// Invalidate the inode entry
+	invalidation_buffer.last_block = block;
+	invalidation_buffer.timestamp = ++flogfs.t;
+	flog_open_sector(inode_iter.block, inode_iter.sector + 1);
+	flash_write_sector(&sector_buffer, inode_iter.sector + 1, 0,
+	                   sizeof(flog_inode_file_invalidation_t));
+
+	// A disk failure here can be recovered in mounting
+
+	// Invalidate the file block chain
+	flog_invalidate_chain(find_result.first_block);
+
+	flash_unlock();
+	flog_unlock_fs();
+	return FLOG_SUCCESS;
+
+failure:
+	flash_unlock();
+	flog_unlock_fs();
 	return FLOG_FAILURE;
 }
 
@@ -1290,6 +1382,20 @@ static inline void flog_close_sector(){
 	flogfs.cache_status.page_open = 0;
 }
 
+static inline flog_block_idx_t
+flog_universal_get_next_block(flog_block_idx_t block){
+	if(block == FLOG_BLOCK_IDX_INVALID)
+		return block;
+	flog_open_sector(block, FLOG_FILE_TAIL_SECTOR);
+	flash_read_sector((uint8_t*)&block, FLOG_FILE_TAIL_SECTOR,
+	                  0, sizeof(block));
+	return block;
+}
+
+static inline uint_fast8_t
+flog_inode_iterator_at_end_of_block(flog_inode_iterator_t const * iter){
+	return (iter->sector == -1) ? 1 : 0;
+}
 
 static void flog_inode_iterator_init(flog_inode_iterator_t * iter,
                                      flog_block_idx_t inode0){
@@ -1311,12 +1417,17 @@ static void flog_inode_iterator_init(flog_inode_iterator_t * iter,
 	iter->sector = FS_SECTORS_PER_PAGE;
 }
 
+/*!
+ @details
+ ### Internals
+ Inode entries are organized sequentially in pairs of sectors following the
+ first page. The first page contains simple header information. To iterate to
+ the next entry, we simply advance by two sectors. If this goes past the end of
+ the block, the next block is checked. If the next block hasn't yet been
+ allocated, the sector is set to -1 to indicate that the next block has to be
+ allocated using flog_inode_prepare_new().
+ */
 static void flog_inode_iterator_next(flog_inode_iterator_t * iter){
-	if(iter->sector == FS_SECTORS_PER_BLOCK){
-		// End of chain reached
-		// TODO: Go check to see if it can be advanced
-		return;
-	}
 	iter->sector += 2;
 	iter->inode_idx += 1;
 	if(iter->sector >= FS_SECTORS_PER_BLOCK){
@@ -1325,14 +1436,13 @@ static void flog_inode_iterator_next(flog_inode_iterator_t * iter){
 			// The next block actually already exists
 			iter->block = iter->next_block;
 			// Check the next block
-			flog_open_sector(iter->block, 0);
-			flash_read_sector((uint8_t *)&iter->next_block, FLOG_INODE_TAIL_SECTOR, 0,
-							sizeof(flog_block_idx_t));
+			iter->next_block = flog_universal_get_next_block(iter->block);
 
-			iter->sector = FS_SECTORS_PER_BLOCK;
+			// Point to the first inode sector of the next block
+			iter->sector = FS_SECTORS_PER_PAGE;
 		} else {
 			// The next doesn't exist
-			iter->sector = FS_SECTORS_PER_BLOCK;
+			iter->sector = -1;
 		}
 	}
 }
@@ -1380,6 +1490,9 @@ static flog_result_t flog_inode_prepare_new (flog_inode_iterator_t * iter) {
 		// Sector is now just first in second page
 		iter->sector = FS_SECTORS_PER_PAGE;
 	}
+	// Otherwise this is a completely okay sector to use
+
+	return FLOG_SUCCESS;
 }
 
 static void flog_invalidate_chain (flog_block_idx_t base) {
@@ -1465,6 +1578,7 @@ static flog_block_alloc_t flog_allocate_block(){
 		flog_unlock_allocate();
 		return block;
 	}
+
 	// Preallocate is empty
 	// Go search for another
 	for(flog_block_idx_t i = FS_NUM_BLOCKS; i; i--){
@@ -1475,6 +1589,8 @@ static flog_block_alloc_t flog_allocate_block(){
 		}
 	}
 	flog_unlock_allocate();
+
+	return block;
 }
 
 static inline uint16_t flog_increment_sector(uint16_t sector){
@@ -1508,6 +1624,11 @@ static flog_file_find_result_t flog_find_file(char const * filename,
 		/////////////
 		// Inode search
 		/////////////
+
+		if(flog_inode_iterator_at_end_of_block(iter)){
+			// No more entries to look at
+			goto failure;
+		}
 
 		// Check if the entry is valid
 		flog_open_sector(iter->block, iter->sector);

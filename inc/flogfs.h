@@ -86,7 +86,6 @@ typedef enum {
 #define FLOG_RESULT(x) ((x)?FLOG_SUCCESS:FLOG_FAILURE)
 
 /*!
- @typedef flog_read_file_t
  @brief The state of a currently-open file
 
  This should be allocated by the application and provided to the file system
@@ -110,6 +109,13 @@ typedef struct flog_read_file_t {
 	struct flog_read_file_t * next;
 } flog_read_file_t;
 
+/*!
+ @brief An instance of a file opened for writing.
+
+ This should be allocated by the application and provided to the file system
+ for access to a file. It contains the bulk of the required memory for most
+ operations.
+ */
 typedef struct flog_write_file_t {
 	//! Offset of write head from start of file
 	uint32_t write_head;
@@ -146,16 +152,66 @@ flog_result_t flogfs_format();
  */
 flog_result_t flogfs_mount();
 
+/*!
+ @brief Open a file to read
+ @param file The file structure to use
+ @param filename The name of the file to use
+ @retval FLOG_SUCCESS if successful
+ @retval FLOG_FAILURE otherwise (doesn't exist or corruption)
+ */
 flog_result_t flogfs_open_read(flog_read_file_t * file, char const * filename);
 
+/*!
+ @brief Open a file to write
+ @param file The file structure to use
+ @param filename The name of the file to use
+ @retval FLOG_SUCCESS if successful
+ @retval FLOG_FAILURE otherwise
+
+ Since the system is append-only, it automatically seeks to the end of the file
+ if it exists. Check the flog_write_file_t::write_head value to see where you
+ are writing.
+ */
 flog_result_t flogfs_open_write(flog_write_file_t * file, char const * filename);
 
+/*!
+ @brief Close a file which has been opened for reading
+ @param file The currently-open read file
+ @retval FLOG_SUCCESS if successful
+ @retval FLOG_FAILURE otherwise
+ */
 flog_result_t flogfs_close_read(flog_read_file_t * file);
 
+/*!
+ @brief Close a file which has been opened for writing
+ @param file The currently-open write file
+ @retval FLOG_SUCCESS if successful
+ @retval FLOG_FAILURE otherwise
+ */
 flog_result_t flogfs_close_write(flog_write_file_t * file);
 
+/*!
+ @brief Remove a file from the filesystem
+ @param filename The name of the file
+ */
+flog_result_t flogfs_rm(char const * filename);
+
+/*!
+ @brief Read data from an open file
+ @param file The file structure to read from
+ @param dst The destination for the data
+ @param nbytes The number of bytes to try to read
+ @returns The number of bytes read
+ */
 uint32_t flogfs_read(flog_read_file_t * file, uint8_t * dst, uint32_t nbytes);
 
+/*!
+ @brief Write data to an open file
+ @param file The file structure to write to
+ @param src The data source
+ @param nbytes The number of bytes to try to write
+ @returns The number of bytes written
+ */
 uint32_t flogfs_write(flog_write_file_t * file, uint8_t const * src,
                       uint32_t nbytes);
 
