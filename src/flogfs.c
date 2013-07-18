@@ -817,7 +817,7 @@ uint32_t flogfs_read(flog_read_file_t * file, uint8_t * dst, uint32_t nbytes){
 				flog_open_sector(file->block, sector);
 				flash_read_spare(&sector_spare, sector);
 
-				if(file_sector_spare.nbytes == -1){
+				if(file_sector_spare.nbytes == FLOG_SECTOR_NBYTES_INVALID){
 					// We're looking at an empty sector, GTFO
 					goto done;
 				} else {
@@ -1044,7 +1044,7 @@ flog_result_t flogfs_open_write(flog_write_file_t * file, char const * filename)
 			flog_open_sector(file->block, FLOG_FILE_TAIL_SECTOR);
 			flash_read_sector(&sector_buffer, FLOG_FILE_TAIL_SECTOR, 0,
 			                  sizeof(flog_file_tail_sector_header_t));
-			if(file_tail_sector_header.timestamp != FLOG_TIMESTAMP_INVALID){
+			if(file_tail_sector_header.timestamp == FLOG_TIMESTAMP_INVALID){
 				// This block is incomplete
 				break;
 			}
@@ -1063,7 +1063,7 @@ flog_result_t flogfs_open_write(flog_write_file_t * file, char const * filename)
 			// For each block in the file
 			flog_open_sector(file->block, file->sector);
 			flash_read_spare(&spare_buffer, file->sector);
-			if(file_sector_spare.nbytes == -1){
+			if(file_sector_spare.nbytes == FLOG_SECTOR_NBYTES_INVALID){
 				// No data
 				// We will write here!
 				if(file->sector == FLOG_FILE_TAIL_SECTOR){
@@ -1428,7 +1428,7 @@ static flog_block_alloc_t flog_allocate_block_iterate(){
 	flog_open_sector(flogfs.allocate_head, 0);
 	flash_read_sector(&sector0_buffer, 0, 0,
 	                  sizeof(flog_universal_sector0_header_t));
-	if(universal_sector0_header.age == -1){
+	if(universal_sector0_header.age == FLOG_BLOCK_AGE_INVALID){
 		// Never been allocated!
 		block.block = flogfs.allocate_head;
 		block.age = 0;
@@ -1572,8 +1572,8 @@ void flog_inode_iterator_init(flog_inode_iterator_t * iter,
  first page. The first page contains simple header information. To iterate to
  the next entry, we simply advance by two sectors. If this goes past the end of
  the block, the next block is checked. If the next block hasn't yet been
- allocated, the sector is set to -1 to indicate that the next block has to be
- allocated using flog_inode_prepare_new().
+ allocated, the sector is set to invalid to indicate that the next block has to
+ be allocated using flog_inode_prepare_new().
  */
 void flog_inode_iterator_next(flog_inode_iterator_t * iter){
 	iter->sector += 2;

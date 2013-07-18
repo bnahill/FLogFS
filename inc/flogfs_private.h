@@ -95,6 +95,7 @@ typedef enum {
 #define FLOG_BLOCK_AGE_INVALID ((flog_block_age_t)(-1))
 #define FLOG_FILE_ID_INVALID   ((flog_file_id_t)(-1))
 #define FLOG_TIMESTAMP_INVALID ((flog_timestamp_t)(-1))
+#define FLOG_SECTOR_NBYTES_INVALID ((flog_sector_nbytes_t)(-1))
 //! @}
 
 //! A marker value to identify a completed inode copy
@@ -176,7 +177,7 @@ typedef struct {
 	flog_block_idx_t next_block;
 	flog_block_age_t next_age;
 	flog_timestamp_t timestamp;
-	uint16_t bytes_in_block;
+	flog_sector_nbytes_t bytes_in_block;
 } flog_file_tail_sector_header_t;
 
 typedef struct {
