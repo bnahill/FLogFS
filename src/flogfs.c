@@ -955,11 +955,16 @@ uint32_t flogfs_write(flog_write_file_t * file, uint8_t const * src,
 			} else {
 				written = FS_SECTOR_SIZE - file->offset;
 
+				file_sector_spare.type_id = FLOG_BLOCK_TYPE_FILE;
 				// We need to just write the data and advance
 				if(file->sector == 0){
 					// Need to prepare sector 0 header
 					file_sector0->file_id = file->id;
 					file_sector0->age = file->block_age;
+					file_sector_spare.nbytes =
+					   FS_SECTOR_SIZE - sizeof(flog_file_sector0_header_t);
+				} else {
+					file_sector_spare.nbytes = FS_SECTOR_SIZE;
 				}
 
 				flog_open_sector(file->block, file->sector);
@@ -968,6 +973,7 @@ uint32_t flogfs_write(flog_write_file_t * file, uint8_t const * src,
 					flash_write_sector(file->sector_buffer, file->sector, 0, file->offset);
 				}
 				flash_write_sector(src, file->sector, file->offset, written);
+				flash_write_spare(&sector_spare, file->sector);
 				flash_commit();
 
 				// Now update stuff for the new sector
@@ -980,6 +986,8 @@ uint32_t flogfs_write(flog_write_file_t * file, uint8_t const * src,
 				file->bytes_in_block += written;
 				file->sector_remaining_bytes = FS_SECTOR_SIZE - file->offset;
 				file->write_head += written;
+
+				//file_sector_spare.nbytes = file->offset + written;
 
 				nbytes -= written;
 				src += written;
@@ -1124,6 +1132,8 @@ flog_result_t flogfs_open_write(flog_write_file_t * file, char const * filename)
 		file->block = alloc_block.block;
 		file->block_age = alloc_block.age;
 		file->id = flogfs.max_file_id;
+		file->bytes_in_block = 0;
+		file->write_head = 0;
 		file->sector = 0;
 		file->offset = sizeof(flog_file_sector0_header_t);
 		file->sector_remaining_bytes = FS_SECTOR_SIZE -
