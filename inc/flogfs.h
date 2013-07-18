@@ -110,7 +110,7 @@ typedef struct {
 	uint16_t sector;
 } flog_inode_iterator_t;
 
-typedef flog_inode_iterator_t flog_ls_iterator_t;
+typedef flog_inode_iterator_t flogfs_ls_iterator_t;
 
 #define FLOG_RESULT(x) ((x)?FLOG_SUCCESS:FLOG_FAILURE)
 
@@ -247,7 +247,7 @@ uint32_t flogfs_write(flog_write_file_t * file, uint8_t const * src,
 /*!
  @brief Start listing files (lock inode table)
  */
-void flogfs_start_ls(flog_ls_iterator_t * iter);
+void flogfs_start_ls(flogfs_ls_iterator_t * iter);
 
 /*!
  @brief Read another filename
@@ -255,12 +255,12 @@ void flogfs_start_ls(flog_ls_iterator_t * iter);
  @retval 1 Successful
  @retval 0 This is the end of the data
  */
-uint_fast8_t flogfs_ls_iterate(flog_ls_iterator_t * iter, char * fname_dst);
+uint_fast8_t flogfs_ls_iterate(flogfs_ls_iterator_t * iter, char * fname_dst);
 
 /*!
  @brief Unlock the inode table when done listing
  */
-void flogfs_stop_ls(flog_ls_iterator_t * iter);
+void flogfs_stop_ls(flogfs_ls_iterator_t * iter);
 
 #if !FLOG_BUILD_CPP
 #ifdef __cplusplus
