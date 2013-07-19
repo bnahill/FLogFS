@@ -93,22 +93,22 @@ typedef struct {
 
 	//! The average block age in the file system
 	uint32_t mean_block_age;
-	
+
 	//! A list of preallocated blocks for quick access
 	flog_prealloc_list_t prealloc;
-	
+
 	//! The most recent timestamp (sequence number)
 	//! @note To put a stamp on a new operation, you should preincrement. This
 	//! is the timestamp of the most recent operation
 	flog_timestamp_t t;
-	
+
 	//! The location of the first inode block
 	flog_block_idx_t inode0;
 	//! The number of files in the system
 	flog_file_id_t   num_files;
 	//! The number of free blocks
 	flog_block_idx_t num_free_blocks;
-	
+
 	//! @brief Flash cache status
 	//! @note This must be protected under @ref flogfs_t::lock !
 	struct {
@@ -117,7 +117,7 @@ typedef struct {
 	uint_fast8_t     page_open;
 	flog_result_t    page_open_result;
 	} cache_status;
-	
+
 	//! A lock to serialize some FS operations
 	fs_lock_t lock;
 	//! A lock to block any allocation-related operations
@@ -274,6 +274,10 @@ static inline void flog_invalidate_chain(flog_block_idx_t base);
  @note This requires the allocation lock
  */
 static void flog_flush_dirty_block();
+
+static flog_result_t flog_commit_file_sector(flog_write_file_t * file,
+                                             uint8_t const * data,
+                                             flog_sector_nbytes_t n);
 
 //! @}
 
@@ -864,135 +868,22 @@ done:
 uint32_t flogfs_write(flog_write_file_t * file, uint8_t const * src,
                       uint32_t nbytes){
 	uint32_t count = 0;
-	uint16_t written;
-
-	flog_block_alloc_t block_alloc;
-
-	union {
-		uint8_t sector_header;
-		flog_file_tail_sector_header_t file_tail_sector_header;
-		flog_file_sector0_header_t file_sector0_header;
-	};
-
-	union {
-		uint8_t sector_spare;
-		flog_file_sector_spare_t file_sector_spare;
-	};
-
-	union {
-		uint8_t * sector_buffer;
-		flog_file_sector0_header_t * file_sector0;
-		flog_file_tail_sector_t * file_tail_sector;
-	};
-
-	sector_buffer = file->sector_buffer;
 
 	flog_lock_fs();
 	flash_lock();
 
 	while(nbytes){
 		if(nbytes >= file->sector_remaining_bytes){
-			// We will fill this sector
-			// Write to flash in two parts (cached, then new) to avoid copying
-			if(file->sector == FLOG_FILE_TAIL_SECTOR){
-				// We also need to allocate a new block!
-
-				flog_lock_allocate();
-
-				flog_flush_dirty_block();
-
-				block_alloc = flog_allocate_block();
-
-				if(block_alloc.block == FLOG_BLOCK_IDX_INVALID){
-					// We must be out of space
-					// Don't write anything here or advance any pointers
-					// Just return
-					flog_unlock_allocate();
-					return FLOG_FAILURE;
-				}
-
-				flogfs.dirty_block.block = block_alloc.block;
-				flogfs.dirty_block.file = file;
-
-				flog_unlock_allocate();
-
-				// Prepare the header
-				file_tail_sector->header.next_age = block_alloc.age + 1;
-				file_tail_sector->header.next_block = block_alloc.block;
-				file_tail_sector->header.timestamp = ++flogfs.t;
-				file->bytes_in_block +=
-				   FS_SECTOR_SIZE - sizeof(flog_file_tail_sector_header_t);
-				file_sector_spare.nbytes =
-				   FS_SECTOR_SIZE - sizeof(flog_file_tail_sector_header_t);
-				file_tail_sector->header.bytes_in_block = file->bytes_in_block;
-
-				flog_open_sector(file->block, FLOG_FILE_TAIL_SECTOR);
-				// First write what was already buffered (and the header)
-				flash_write_sector(sector_buffer, FLOG_FILE_TAIL_SECTOR, 0,
-				                   file->offset);
-				// Now write the rest of the data
-				flash_write_sector(src, FLOG_FILE_TAIL_SECTOR, file->offset,
-				                   FS_SECTOR_SIZE - file->offset);
-				flash_write_spare(&sector_spare, FLOG_FILE_TAIL_SECTOR);
-				flash_commit();
-
-				written = FS_SECTOR_SIZE - file->offset;
-
-				// Now that sector is completely written
-				src += written;
-				nbytes -= written;
-				count += written;
-				file->write_head += written;
-
-				// Ready the file structure for the next block/sector
-				file->block = block_alloc.block;
-				file->block_age = block_alloc.age;
-				file->sector = 0;
-				file->sector_remaining_bytes =
-				   FS_SECTOR_SIZE - sizeof(flog_file_sector0_header_t);
-				file->bytes_in_block = 0;
-				file->offset = sizeof(flog_file_sector0_header_t);
-			} else {
-				written = FS_SECTOR_SIZE - file->offset;
-
-				file_sector_spare.type_id = FLOG_BLOCK_TYPE_FILE;
-				// We need to just write the data and advance
-				if(file->sector == 0){
-					// Need to prepare sector 0 header
-					file_sector0->file_id = file->id;
-					file_sector0->age = file->block_age;
-					file_sector_spare.nbytes =
-					   FS_SECTOR_SIZE - sizeof(flog_file_sector0_header_t);
-				} else {
-					file_sector_spare.nbytes = FS_SECTOR_SIZE;
-				}
-
-				flog_open_sector(file->block, file->sector);
-				if(file->offset){
-					// First write prior data/header
-					flash_write_sector(file->sector_buffer, file->sector, 0, file->offset);
-				}
-				flash_write_sector(src, file->sector, file->offset, written);
-				flash_write_spare(&sector_spare, file->sector);
-				flash_commit();
-
-				// Now update stuff for the new sector
-				file->sector = flog_increment_sector(file->sector);
-				if(file->sector == FLOG_FILE_TAIL_SECTOR){
-					file->offset = sizeof(flog_file_tail_sector_header_t);
-				} else {
-					file->offset = 0;
-				}
-				file->bytes_in_block += written;
-				file->sector_remaining_bytes = FS_SECTOR_SIZE - file->offset;
-				file->write_head += written;
-
-				//file_sector_spare.nbytes = file->offset + written;
-
-				nbytes -= written;
-				src += written;
-				count += written;
+			if(flog_commit_file_sector(file, src,
+				file->sector_remaining_bytes) == FLOG_FAILURE){
+				// Couldn't allocate or something
+				return count;
 			}
+
+			// Now that sector is completely written
+			src += file->sector_remaining_bytes;
+			nbytes -= file->sector_remaining_bytes;
+			count += file->sector_remaining_bytes;
 		} else {
 			// This is smaller than a sector; cache it
 			memcpy(file->sector_buffer + file->offset, src, nbytes);
@@ -1095,8 +986,7 @@ flog_result_t flogfs_open_write(flog_write_file_t * file, char const * filename)
 		}
 
 		// Configure inode to write
-		strncpy(inode_file_allocation_sector.filename,
-		        filename, FLOG_MAX_FNAME_LEN);
+		strcpy(inode_file_allocation_sector.filename, filename);
 		inode_file_allocation_sector.filename[FLOG_MAX_FNAME_LEN-1] = '\0';
 
 		flog_lock_allocate();
@@ -1169,6 +1059,8 @@ failure:
  ### Internals
  To close a write, all outstanding data must simply be flushed to flash. If any
  blocks are newly-allocated, they must be committed.
+
+ TODO: Deal with files that can't be flushed due to no space for allocation
  */
 flog_result_t flogfs_close_write(flog_write_file_t * file){
 	flog_write_file_t * iter;
@@ -1317,96 +1209,108 @@ void flogfs_stop_ls(flogfs_ls_iterator_t * iter){
 // Static implementations
 ///////////////////////////////////////////////////////////////////////////////
 
-static flog_result_t flog_flush_write (flog_write_file_t* file ){
-	union {
-		uint8_t * sector_buffer;
-		flog_file_tail_sector_t * file_tail_sector;
-		flog_file_sector_spare_t * file_sector_spare;
-		flog_file_sector0_header_t * file_sector0_header;
-		uint32_t * spare;
-	};
-
-	flog_block_alloc_t block_alloc;
-
-	sector_buffer = file->sector_buffer;
-
-	if(file->sector == 0){
-		// Write whatever it is, data or no data
-		file_sector0_header->age = file->block_age;
-		file_sector0_header->file_id = file->id;
-		flog_open_sector(file->block, 0);
-		flash_write_sector(sector_buffer, 0, 0, file->offset);
-		file_sector_spare->nbytes = file->offset -
-		                            sizeof(flog_file_sector0_header_t);
-		file_sector_spare->type_id = FLOG_BLOCK_TYPE_FILE;
-		flash_write_spare(sector_buffer, 0);
-		flash_commit();
-	} else if(file->sector == FLOG_FILE_TAIL_SECTOR) {
-		// Write only if the offset is greater than the header size
-		// Also, allocate
+flog_result_t flog_commit_file_sector(flog_write_file_t * file,
+                                      uint8_t const * data,
+                                      flog_sector_nbytes_t n){
+	flog_file_sector_spare_t file_sector_spare;
+	if(file->sector == FLOG_FILE_TAIL_SECTOR){
+		flog_block_alloc_t next_block;
+		flog_file_tail_sector_header_t * const file_tail_sector_header =
+		   (flog_file_tail_sector_header_t *) file->sector_buffer;
 
 		flog_lock_allocate();
 
 		flog_flush_dirty_block();
 
-		block_alloc = flog_allocate_block();
-		if(block_alloc.block == FLOG_BLOCK_IDX_INVALID){
+		next_block = flog_allocate_block();
+		if(next_block.block == FLOG_BLOCK_IDX_INVALID){
 			// Can't write the last sector without sealing the file.
 			// Bailing
 			flog_unlock_allocate();
 			return FLOG_FAILURE;
 		}
 
-		flogfs.dirty_block.block = block_alloc.block;
+		flogfs.dirty_block.block = next_block.block;
 		flogfs.dirty_block.file = file;
 
 		flog_unlock_allocate();
 
-		file_tail_sector->header.bytes_in_block = file->bytes_in_block;
-		file_tail_sector->header.next_age = block_alloc.age;
-		file_tail_sector->header.timestamp = ++flogfs.t;
-		file_tail_sector->header.next_block = block_alloc.block;
+		// Prepare the header
+		file_tail_sector_header->next_age = next_block.age + 1;
+		file_tail_sector_header->next_block = next_block.block;
+		file_tail_sector_header->timestamp = ++flogfs.t;
+		file->bytes_in_block +=
+			FS_SECTOR_SIZE - sizeof(flog_file_tail_sector_header_t);
+		file_sector_spare.nbytes =
+			FS_SECTOR_SIZE - sizeof(flog_file_tail_sector_header_t);
+		file_tail_sector_header->bytes_in_block = file->bytes_in_block;
 
 		flog_open_sector(file->block, FLOG_FILE_TAIL_SECTOR);
-		flash_write_sector(sector_buffer, FLOG_FILE_TAIL_SECTOR,
-		                   0, file->offset);
-		(*file_sector_spare).nbytes = file->offset -
-		   sizeof(flog_file_tail_sector_header_t);
-		flash_write_spare(sector_buffer, FLOG_FILE_TAIL_SECTOR);
+		// First write what was already buffered (and the header)
+		flash_write_sector((uint8_t const *)file_tail_sector_header,
+						FLOG_FILE_TAIL_SECTOR, 0, file->offset);
+		// Now write the rest of the data
+		flash_write_sector(data, FLOG_FILE_TAIL_SECTOR, file->offset,
+							FS_SECTOR_SIZE - file->offset);
+		flash_write_spare((uint8_t const *)&file_sector_spare, FLOG_FILE_TAIL_SECTOR);
 		flash_commit();
 
-		// Now go prepare the next one
-		flash_erase_block(block_alloc.block);
-
-		flog_open_sector(block_alloc.block, 0);
-		file_sector0_header->age = block_alloc.age + 1;
-		file_sector0_header->file_id = file->id;
-		flash_write_sector(sector_buffer, 0, 0,
-		                   sizeof(flog_file_sector0_header_t));
-		(*file_sector_spare).type_id = FLOG_BLOCK_TYPE_FILE;
-		(*file_sector_spare).nbytes = 0;
-		flash_write_spare(sector_buffer, 0);
-		flash_commit();
-
-		// Update the file stats
-		file->block = block_alloc.block;
-		file->block_age = block_alloc.age;
-		// Will now be writing to second sector
-		file->sector = flog_increment_sector(0);
-		file->sector_remaining_bytes = FS_SECTOR_SIZE;
-		file->offset = 0;
+		// Ready the file structure for the next block/sector
+		file->block = next_block.block;
+		file->block_age = next_block.age;
+		file->sector = 0;
+		file->sector_remaining_bytes =
+		FS_SECTOR_SIZE - sizeof(flog_file_sector0_header_t);
 		file->bytes_in_block = 0;
-	} else if(file->offset){
-		// There is data in this sector, write it and move on
-		flog_open_sector(file->block, file->sector);
-		flash_write_sector(sector_buffer, file->sector, 0, file->offset);
-		*spare = 0xFFFFFFFF;
-		(*file_sector_spare).nbytes = file->offset;
-		flash_write_spare(sector_buffer, file->sector);
-		flash_commit();
-	}
+		file->offset = sizeof(flog_file_sector0_header_t);
+		file->write_head += n;
+		return FLOG_SUCCESS;
+	} else {
 
-	return FLOG_SUCCESS;
+		flog_file_sector0_header_t * const file_sector0_header =
+			(flog_file_sector0_header_t *) file->sector_buffer;
+
+		flog_lock_allocate();
+		if(flogfs.dirty_block.file == file){
+			flogfs.dirty_block.block = FLOG_BLOCK_IDX_INVALID;
+		}
+		flog_unlock_allocate();
+		file_sector_spare.type_id = FLOG_BLOCK_TYPE_FILE;
+		file_sector_spare.nbytes = file->offset + n;
+
+		// We need to just write the data and advance
+		if(file->sector == 0){
+			// Need to prepare sector 0 header
+			file_sector0_header->file_id = file->id;
+			file_sector0_header->age = file->block_age;
+		}
+
+		flog_open_sector(file->block, file->sector);
+		if(file->offset){
+			// This is either sector 0 or there was data already
+			// First write prior data/header
+			flash_write_sector(file->sector_buffer, file->sector, 0, file->offset);
+		}
+		flash_write_sector(data, file->sector, file->offset, n);
+		flash_write_spare((uint8_t const *)&file_sector_spare, file->sector);
+		flash_commit();
+
+		// Now update stuff for the new sector
+		file->sector = flog_increment_sector(file->sector);
+		if(file->sector == FLOG_FILE_TAIL_SECTOR){
+			file->offset = sizeof(flog_file_tail_sector_header_t);
+		} else {
+			file->offset = 0;
+		}
+		file->bytes_in_block += n;
+		file->sector_remaining_bytes = FS_SECTOR_SIZE - file->offset;
+		file->write_head += n;
+		return FLOG_SUCCESS;
+	}
+}
+
+flog_result_t flog_flush_write (flog_write_file_t * file ){
+	return flog_commit_file_sector(file, 0, 0);;
 }
 
 
