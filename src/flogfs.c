@@ -1271,6 +1271,7 @@ flog_result_t flog_commit_file_sector(flog_write_file_t * file,
 			(flog_file_sector0_header_t *) file->sector_buffer;
 
 		flog_lock_allocate();
+		// So if this block is the dirty block...
 		if(flogfs.dirty_block.file == file){
 			flogfs.dirty_block.block = FLOG_BLOCK_IDX_INVALID;
 		}
@@ -1310,18 +1311,18 @@ flog_result_t flog_commit_file_sector(flog_write_file_t * file,
 }
 
 flog_result_t flog_flush_write (flog_write_file_t * file ){
-	return flog_commit_file_sector(file, 0, 0);;
+	return flog_commit_file_sector(file, 0, 0);
 }
 
 
-static void flog_prealloc_iterate() {
+void flog_prealloc_iterate() {
 	flog_block_alloc_t block;
 	block = flog_allocate_block_iterate();
 	flog_prealloc_push(block.block, block.age);
 }
 
 
-static flog_block_alloc_t flog_allocate_block_iterate(){
+flog_block_alloc_t flog_allocate_block_iterate(){
 	flog_block_alloc_t block;
 	union {
 		uint8_t sector0_buffer;
