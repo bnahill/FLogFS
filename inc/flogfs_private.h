@@ -84,6 +84,7 @@ typedef enum {
  Those values not present represent an error
  */
 typedef enum {
+	FLOG_BLOCK_TYPE_ERROR = 0,
 	FLOG_BLOCK_TYPE_UNALLOCATED = 0xFF,
 	FLOG_BLOCK_TYPE_INODE = 1,
 	FLOG_BLOCK_TYPE_FILE = 2
@@ -102,19 +103,30 @@ typedef enum {
 static uint8_t const flog_copy_complete_marker = 0x55;
 
 
+typedef struct {
+	//! The age of the block
+	flog_block_age_t age;
+	//! The timestamp of the invalidation
+	flog_timestamp_t invalidation_timestamp;
+	//! The next block in the chain
+	flog_block_idx_t next_block;
+	//! The age of @ref next_block
+	flog_block_age_t next_invalidation_age;
+} flog_block_stat_sector_t;
+
 //! @defgroup FLogInodeBlockStructs Inode block structures
 //! @brief Descriptions of the data in inode blocks
 //! @{
 typedef struct {
-	flog_block_age_t age;
+	//flog_block_age_t age;
 	flog_timestamp_t timestamp;
-} flog_inode_sector0_t;
+} flog_inode_init_sector_t;
 
 typedef struct {
 	uint8_t type_id;
 	uint8_t nothing;
 	inode_index_t inode_index;
-} flog_inode_sector0_spare_t;
+} flog_inode_init_sector_spare_t;
 
 typedef struct {
 	flog_block_idx_t next_block;
@@ -153,7 +165,7 @@ typedef struct {
 
 typedef struct {
 	flog_block_age_t age;
-} flog_universal_sector0_header_t;
+} flog_universal_init_sector_header_t;
 
 typedef struct {
 	flog_timestamp_t timestamp;
@@ -166,12 +178,12 @@ typedef struct {
 typedef struct {
 	flog_block_age_t age;
 	flog_file_id_t file_id;
-} flog_file_sector0_header_t;
+} flog_file_init_sector_header_t;
 
 typedef struct {
-	flog_file_sector0_header_t header;
-	uint8_t data[FS_SECTOR_SIZE - sizeof(flog_file_sector0_header_t)];
-} flog_file_sector0_t;
+	flog_file_init_sector_header_t header;
+	uint8_t data[FS_SECTOR_SIZE - sizeof(flog_file_init_sector_header_t)];
+} flog_file_init_sector_t;
 
 typedef struct {
 	flog_block_idx_t next_block;
@@ -202,10 +214,11 @@ typedef struct {
 //! @name Special sector indices
 //! @{
 typedef enum {
-	FLOG_FILE_TAIL_SECTOR          = (FS_SECTORS_PER_PAGE - 2),
-	FLOG_FILE_INVALIDATION_SECTOR  = (FS_SECTORS_PER_PAGE - 1),
-	FLOG_INODE_TAIL_SECTOR         = (FS_SECTORS_PER_PAGE - 2),
-	FLOG_INODE_INVALIDATION_SECTOR = (FS_SECTORS_PER_PAGE - 1)
+	FLOG_BLK_STAT_SECTOR           = (0),
+	FLOG_INIT_SECTOR               = (1),
+	FLOG_TAIL_SECTOR               = (3),
+	FLOG_FILE_FIRST_DATA_SECTOR    = (2),
+	FLOG_INODE_FIRST_ENTRY_SECTOR  = (4)
 } flog_sector_special_idx_t;
 //! @}
 
