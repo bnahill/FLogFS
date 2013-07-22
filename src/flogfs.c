@@ -1214,6 +1214,7 @@ flog_result_t flog_commit_file_sector(flog_write_file_t * file,
                                       flog_sector_nbytes_t n){
 	flog_file_sector_spare_t file_sector_spare;
 	if(file->sector == FLOG_FILE_TAIL_SECTOR){
+		// We need a new block
 		flog_block_alloc_t next_block;
 		flog_file_tail_sector_header_t * const file_tail_sector_header =
 		   (flog_file_tail_sector_header_t *) file->sector_buffer;
@@ -1232,6 +1233,8 @@ flog_result_t flog_commit_file_sector(flog_write_file_t * file,
 
 		flogfs.dirty_block.block = next_block.block;
 		flogfs.dirty_block.file = file;
+
+		flogfs.num_free_blocks -= 1;
 
 		flog_unlock_allocate();
 
