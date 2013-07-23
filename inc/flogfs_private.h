@@ -179,6 +179,7 @@ typedef struct {
 //! @{
 
 typedef struct {
+	flog_timestamp_t timestamp;
 	flog_block_age_t age;
 	flog_file_id_t file_id;
 } flog_file_init_sector_header_t;
