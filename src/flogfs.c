@@ -211,6 +211,8 @@ static inline flog_result_t flog_open_page(uint16_t block, uint16_t page);
 static inline flog_result_t flog_open_sector(uint16_t block, uint16_t sector);
 
 
+static void flog_close_sector();
+
 /*!
  @brief Initialize an inode iterator
  @param[in,out] iter The iterator structure
@@ -274,7 +276,8 @@ static flog_block_alloc_t flog_prealloc_pop();
  @brief Invalidate a chain of blocks
  @param base The first block in the chain
  */
-static inline void flog_invalidate_chain(flog_block_idx_t base);
+static void
+flog_invalidate_chain(flog_block_idx_t base, flog_file_id_t file_id);
 
 /*!
  @brief Check for a dirty block and flush it to allow for a new allocation
@@ -287,6 +290,33 @@ static flog_result_t flog_commit_file_sector(flog_write_file_t * file,
                                              uint8_t const * data,
                                              flog_sector_nbytes_t n);
 
+static flog_timestamp_t flog_block_get_init_timestamp(flog_block_idx_t block);
+
+static flog_block_age_t flog_block_get_age(flog_block_idx_t block);
+
+static void flog_get_file_tail_sector(flog_block_idx_t block,
+                                      flog_file_tail_sector_header_t * header);
+
+static void flog_get_file_init_sector(flog_block_idx_t block,
+                                      flog_file_init_sector_header_t * header);
+
+static void
+flog_get_universal_tail_sector(flog_block_idx_t block,
+                               flog_universal_tail_sector_t * header);
+
+static flog_block_type_t
+flog_get_block_type(flog_block_idx_t block);
+
+static flog_file_id_t
+flog_block_get_file_id(flog_block_idx_t block);
+
+static void
+flog_write_block_stat(flog_block_idx_t block,
+                      flog_block_stat_sector_t const * stat);
+
+static void
+flog_get_block_stat(flog_block_idx_t block, flog_block_stat_sector_t * stat);
+
 //! @}
 
 
@@ -298,6 +328,7 @@ flog_result_t flogfs_init(){
 	// Initialize locks
 	fs_lock_init(&flogfs.allocate_lock);
 	fs_lock_init(&flogfs.lock);
+	fs_lock_init(&flogfs.delete_lock);
 
 	flogfs.state = FLOG_STATE_RESET;
 	flogfs.cache_status.page_open = 0;
@@ -313,6 +344,12 @@ flog_result_t flogfs_format(){
 		flog_inode_init_sector_t main_buffer;
 		flog_inode_init_sector_spare_t spare_buffer;
 	};
+	
+	struct {
+		flog_block_stat_sector_t stat;
+		char key[sizeof(flog_block_stat_key)];
+	} stat_sector;
+	
 	flash_lock();
 	flog_lock_fs();
 
@@ -321,13 +358,30 @@ flog_result_t flogfs_format(){
 		if(FLOG_SUCCESS == flash_block_is_bad()){
 			continue;
 		}
-		// Otherwise go erase it
+		flash_read_sector((uint8_t *)&stat_sector, FLOG_BLK_STAT_SECTOR,
+		                  0, sizeof(stat_sector));
+		if(memcmp(stat_sector.key, flog_block_stat_key,
+		   sizeof(flog_block_stat_key)) != 0){
+			// Actually need to initialize this block
+			stat_sector.stat.age = 0;
+			memcpy(stat_sector.key, flog_block_stat_key,
+			       sizeof(flog_block_stat_key));
+		}// TODO: age should be incremented otherwise
+		stat_sector.stat.next_block = FLOG_BLOCK_IDX_INVALID;
+		stat_sector.stat.next_age = FLOG_BLOCK_AGE_INVALID;
+		stat_sector.stat.timestamp = 0;
+		flog_close_sector();
+		// Go erase it
 		if(FLOG_FAILURE == flash_erase_block(i)){
 			flog_unlock_fs();
 			flash_unlock();
 			flash_debug_error("FLogFS:" LINESTR);
 			return FLOG_FAILURE;
 		}
+		flog_open_sector(i, FLOG_BLK_STAT_SECTOR);
+		flash_write_sector((uint8_t *)&stat_sector, FLOG_BLK_STAT_SECTOR,
+		                   0, sizeof(stat_sector));
+		flash_commit();
 		if(first_valid == FLOG_BLOCK_IDX_INVALID){
 			first_valid = i;
 		}
@@ -336,13 +390,14 @@ flog_result_t flogfs_format(){
 	// Really just assuming that at least 1 valid block was found
 
 	// Write the first file table
-	flash_open_page(first_valid, 0);
+	flog_open_sector(first_valid, FLOG_INIT_SECTOR);
 	main_buffer.timestamp = 0;
+	main_buffer.previous = FLOG_BLOCK_IDX_INVALID;
 	flash_write_sector((const uint8_t *)&main_buffer,
-	                   0, 0, sizeof(main_buffer));
+	                   FLOG_INIT_SECTOR, 0, sizeof(main_buffer));
 	spare_buffer.inode_index = 0;
 	spare_buffer.type_id = FLOG_BLOCK_TYPE_INODE;
-	flash_write_spare((const uint8_t *)&spare_buffer, 0);
+	flash_write_spare((const uint8_t *)&spare_buffer, FLOG_INIT_SECTOR);
 	flash_commit();
 
 	flog_unlock_fs();
@@ -350,44 +405,6 @@ flog_result_t flogfs_format(){
 	return FLOG_SUCCESS;
 }
 
-
-static flog_timestamp_t flog_block_get_init_timestamp(flog_block_idx_t block){
-	flog_timestamp_t ts;
-	flog_open_sector(block, FLOG_INIT_SECTOR);
-	flash_read_sector((uint8_t *)&ts, FLOG_INIT_SECTOR,
-	                  0, sizeof(flog_timestamp_t));
-	return ts;
-}
-
-static flog_block_age_t flog_block_get_age(flog_block_idx_t block){
-	flog_block_age_t age;
-	flog_open_sector(block, FLOG_BLK_STAT_SECTOR);
-	flash_read_sector((uint8_t *)&age, FLOG_BLK_STAT_SECTOR,
-	                  0, sizeof(flog_block_stat_sector_t));
-	return age;
-}
-
-static void flog_get_file_tail_sector(flog_block_idx_t block,
-                                      flog_file_tail_sector_header_t * header){
-	flog_open_sector(block, FLOG_TAIL_SECTOR);
-	flash_read_sector((uint8_t *)header, FLOG_TAIL_SECTOR, 0,
-	                  sizeof(flog_file_tail_sector_header_t));
-}
-
-static void flog_get_file_init_sector(flog_block_idx_t block,
-                                      flog_file_init_sector_header_t * header){
-	flog_open_sector(block, FLOG_INIT_SECTOR);
-	flash_read_sector((uint8_t *)header, FLOG_INIT_SECTOR, 0,
-	                  sizeof(flog_file_init_sector_header_t));
-}
-
-static void
-flog_get_universal_tail_sector(flog_block_idx_t block,
-                               flog_universal_tail_sector_t * header){
-	flog_open_sector(block, FLOG_TAIL_SECTOR);
-	flash_read_sector((uint8_t *)header, FLOG_TAIL_SECTOR, 0,
-	                  sizeof(flog_universal_tail_sector_t));
-}
 
 flog_result_t flogfs_mount(){
 	uint32_t i, done_scanning;
@@ -445,7 +462,6 @@ flog_result_t flogfs_mount(){
 	union {
 		uint8_t sector_buffer;
 		flog_file_tail_sector_header_t file_tail_sector_header;
-		flog_inode_tail_sector_t inode_tail_sector;
 		flog_inode_file_allocation_header_t inode_file_allocation_sector;
 		flog_universal_invalidation_header_t universal_invalidation_header;
 	};
@@ -458,7 +474,7 @@ flog_result_t flogfs_mount(){
 	
 	flog_universal_tail_sector_t universal_tail_sector;
 
-
+	flog_block_age_t age;
 
 	////////////////////////////////////////////////////////////
 	// Initialize data structures
@@ -466,6 +482,7 @@ flog_result_t flogfs_mount(){
 
 	last_allocation.block = FLOG_BLOCK_IDX_INVALID;
 	last_allocation.timestamp = 0;
+	last_allocation.age = 0;
 
 	last_deletion.timestamp = 0;
 	last_deletion.file_id = FLOG_FILE_ID_INVALID;
@@ -515,7 +532,7 @@ flog_result_t flogfs_mount(){
 			continue;
 		}
 		// Read the sector 0 spare to identify valid blocks
-		flash_read_spare((uint8_t *)&spare_buffer, 0);
+		flash_read_spare((uint8_t *)&spare_buffer, FLOG_INIT_SECTOR);
 		
 		switch(inode_spare0.type_id) {
 		case FLOG_BLOCK_TYPE_INODE:
@@ -569,7 +586,7 @@ flog_result_t flogfs_mount(){
 			goto failure;
 		}
 		
-		flog_block_age_t age = flog_block_get_age(i);
+		age = flog_block_get_age(i);
 		// Check if this is a really old block
 		if((age != FLOG_BLOCK_AGE_INVALID) && (age > max_block_age)){
 			max_block_age = age;
@@ -597,7 +614,7 @@ update_last_allocation:
 	////////////////////////////////////////////////////////////
 
 	done_scanning = 0;
-	block = inode0_idx; // THE OLD INODE INDEX
+	// THE OLD INODE CHAIN
 	for(flog_inode_iterator_init(&inode_iter, inode0_idx);;
 		flog_inode_iterator_next(&inode_iter)){
 		
@@ -660,32 +677,60 @@ update_last_allocation:
 	// TODO: Make this work for inode allocations too!
 	// Go check and (maybe) clean the last allocation
 	if(last_allocation.timestamp > 0){
-		flog_open_sector(last_allocation.block, FLOG_INIT_SECTOR);
-		flash_read_sector(&init_sector_buffer, 0, 0,
-		                  sizeof(flog_file_init_sector_header_t));
-		if(file_init_sector_header.file_id != last_allocation.file_id){
-			// This block never got allocated
-			// Erase and initialize it!
-			flash_erase_block(last_allocation.block);
-			flog_open_page(last_allocation.block, 0);
-			file_init_sector_header.age = last_allocation.age;
-			file_init_sector_header.file_id = last_allocation.file_id;
-			flash_write_sector(&init_sector_buffer, 0, 0,
-			                   sizeof(flog_file_init_sector_header_t));
-			file_spare0.nbytes = 0;
-			file_spare0.nothing = 0;
-			file_spare0.type_id = FLOG_BLOCK_TYPE_FILE;
-			flash_write_spare(&spare_buffer, 0);
-			flash_commit();
+		switch(last_allocation.block_type){
+		case FLOG_BLOCK_TYPE_FILE:
+			flog_open_sector(last_allocation.block, FLOG_INIT_SECTOR);
+			flash_read_sector(&init_sector_buffer, FLOG_INIT_SECTOR, 0,
+			                  sizeof(flog_file_init_sector_header_t));
+			if(file_init_sector_header.file_id != last_allocation.file_id){
+				// This block never got claimed
+				// Initialize it!
+				flog_open_sector(last_allocation.block, FLOG_INIT_SECTOR);
+				file_init_sector_header.age = last_allocation.age;
+				file_init_sector_header.file_id = last_allocation.file_id;
+				flash_write_sector(&init_sector_buffer, FLOG_INIT_SECTOR, 0,
+				                   sizeof(flog_file_init_sector_header_t));
+				file_spare0.nbytes = 0;
+				file_spare0.nothing = 0;
+				file_spare0.type_id = FLOG_BLOCK_TYPE_FILE;
+				flash_write_spare(&spare_buffer, 0);
+				flash_commit();
 
-			flogfs.t = last_allocation.timestamp + 1;
+				flogfs.t = last_allocation.timestamp + 1;
+			}
+			break;
+		case FLOG_BLOCK_TYPE_INODE:
+			flog_inode_init_sector_spare_t inode_init_spare;
+			flog_inode_init_sector_t inode_init;
+			if(flog_get_block_type(last_allocation.block) ==
+			   FLOG_BLOCK_TYPE_INODE)
+				break;
+			// Well, it seems the allocation was incomplete
+			flog_open_sector(last_allocation.previous_inode, FLOG_INIT_SECTOR);
+			flash_read_spare((uint8_t *)&inode_init_spare, FLOG_INIT_SECTOR);
+			inode_init.previous = last_allocation.previous_inode;
+			inode_init.timestamp = last_allocation.timestamp;
+			inode_init_spare.inode_index += 1;
+			// Other fields should be valid...
+			flog_open_sector(last_allocation.block, FLOG_INIT_SECTOR);
+			flash_write_sector((uint8_t *)&inode_init, FLOG_INIT_SECTOR, 0,
+			                   sizeof(inode_init));
+			flash_write_spare((uint8_t *)&inode_init_sector, FLOG_INIT_SECTOR);
+			flash_commit();
+			break;
+		default:
+			// Huh?
+			break;
 		}
 	}
 
 	// Verify the completion of the most recent deletion operation
-	if(last_deletion.timestamp > 0){
+	if((last_deletion.timestamp > 0) &&
+	   (flog_get_block_type(last_deletion.last_block) ==
+	      FLOG_BLOCK_TYPE_FILE)){
+
 		flog_open_sector(last_deletion.last_block, FLOG_INIT_SECTOR);
-		flash_read_sector(&init_sector_buffer, 0, 0,
+		flash_read_sector(&init_sector_buffer, FLOG_INIT_SECTOR, 0,
 		                  sizeof(flog_file_init_sector_header_t));
 		if(file_init_sector_header.file_id == last_deletion.file_id){
 			// This is the same file still, see if it's been invalidated
@@ -695,8 +740,8 @@ update_last_allocation:
 			                  sizeof(flog_universal_invalidation_header_t));
 			if(universal_invalidation_header.timestamp != FLOG_TIMESTAMP_INVALID){
 				// Crap, this never got invalidated correctly
-				flog_invalidate_chain(last_deletion.first_block);
-				flash_debug_warn("FLogFS:" LINESTR);
+				flog_invalidate_chain(last_deletion.first_block,
+				                      last_deletion.file_id);
 			}
 		}
 	}
@@ -936,7 +981,7 @@ uint32_t flogfs_write(flog_write_file_t * file, uint8_t const * src,
 			if(flog_commit_file_sector(file, src,
 				file->sector_remaining_bytes) == FLOG_FAILURE){
 				// Couldn't allocate or something
-				return count;
+				goto done;
 			}
 
 			// Now that sector is completely written
@@ -955,7 +1000,7 @@ uint32_t flogfs_write(flog_write_file_t * file, uint8_t const * src,
 		}
 	}
 
-
+done:
 	flash_unlock();
 	flog_unlock_fs();
 
@@ -1081,7 +1126,7 @@ flog_result_t flogfs_open_write(flog_write_file_t * file, char const * filename)
 		file->id = flogfs.max_file_id;
 		file->bytes_in_block = 0;
 		file->write_head = 0;
-		file->sector = 0;
+		file->sector = FLOG_INIT_SECTOR;
 		file->offset = sizeof(flog_file_init_sector_header_t);
 		file->sector_remaining_bytes = FS_SECTOR_SIZE -
 		                               sizeof(flog_file_init_sector_header_t);
@@ -1158,9 +1203,7 @@ failure:
 flog_result_t flogfs_rm(char const * filename){
 	flog_file_find_result_t find_result;
 	flog_inode_iterator_t inode_iter;
-	flog_block_idx_t block, next_block;
-	flog_file_id_t file_id;
-	
+	flog_block_idx_t block, next_block;	
 	
 	union {
 		uint8_t sector_buffer;
@@ -1345,6 +1388,7 @@ flog_result_t flog_commit_file_sector(flog_write_file_t * file,
 			// Need to prepare sector 0 header
 			file_init_sector_header->file_id = file->id;
 			file_init_sector_header->age = file->block_age;
+			file_sector_spare.nbytes -= sizeof(flog_file_init_sector_header_t);
 		}
 
 		flog_open_sector(file->block, file->sector);
@@ -1601,7 +1645,7 @@ flog_result_t flog_inode_prepare_new (flog_inode_iterator_t * iter) {
 	flog_block_alloc_t block_alloc;
 	union{
 		uint8_t sector_buffer;
-		flog_inode_tail_sector_t inode_tail_sector;
+		flog_universal_tail_sector_t inode_tail_sector;
 		flog_inode_init_sector_t inode_init_sector;
 		flog_inode_init_sector_spare_t inode_init_sector_spare;
 	};
@@ -1635,7 +1679,7 @@ flog_result_t flog_inode_prepare_new (flog_inode_iterator_t * iter) {
 		inode_tail_sector.next_block = block_alloc.block;
 		inode_tail_sector.timestamp = ++flogfs.t;
 		flash_write_sector(&sector_buffer, FLOG_TAIL_SECTOR, 0,
-		                   sizeof(flog_inode_tail_sector_t));
+		                   sizeof(flog_universal_tail_sector_t));
 		flash_commit();
 
 		// Now erase the new block
@@ -1657,7 +1701,7 @@ flog_result_t flog_inode_prepare_new (flog_inode_iterator_t * iter) {
 	return FLOG_SUCCESS;
 }
 
-static flog_file_id_t flog_block_get_file_id(flog_block_idx_t block){
+flog_file_id_t flog_block_get_file_id(flog_block_idx_t block){
 	flog_file_id_t id;
 	flog_open_sector(block, FLOG_INIT_SECTOR);
 	flash_read_sector((uint8_t *)&id, FLOG_INIT_SECTOR,
@@ -1665,7 +1709,7 @@ static flog_file_id_t flog_block_get_file_id(flog_block_idx_t block){
 	return id;
 }
 
-static void flog_write_block_stat(flog_block_idx_t block,
+void flog_write_block_stat(flog_block_idx_t block,
                            flog_block_stat_sector_t const * stat){
 	flog_open_sector(block, FLOG_BLK_STAT_SECTOR);
 	flash_write_sector((uint8_t const *)stat,
@@ -1673,7 +1717,7 @@ static void flog_write_block_stat(flog_block_idx_t block,
 	                   sizeof(flog_block_stat_sector_t));
 }
 
-static void flog_get_block_stat(flog_block_idx_t block,
+void flog_get_block_stat(flog_block_idx_t block,
                            flog_block_stat_sector_t * stat){
 	flog_open_sector(block, FLOG_BLK_STAT_SECTOR);
 	flash_read_sector((uint8_t *)stat,
@@ -1734,8 +1778,9 @@ void flog_invalidate_chain (flog_block_idx_t base, flog_file_id_t file_id) {
 				// The the age and index of the next block
 				block_stat.age = init_sector.age;
 				flog_open_sector(base, FLOG_TAIL_SECTOR);
-				flash_read_sector((uint8_t *)file_tail_sector, FLOG_TAIL_SECTOR,
-				                  0, sizeof(flog_file_tail_sector_header_t));
+				flash_read_sector((uint8_t *)&file_tail_sector,
+				                  FLOG_TAIL_SECTOR, 0,
+				                  sizeof(flog_file_tail_sector_header_t));
 				block_stat.next_block = file_tail_sector.next_block;
 				block_stat.next_age = file_tail_sector.next_age;
 				block_stat.timestamp = ++flogfs.t;
@@ -1769,7 +1814,7 @@ flog_block_type_t flog_get_block_type(flog_block_idx_t block){
 		return FLOG_BLOCK_TYPE_ERROR;
 	}
 	flash_read_spare(type_id, FLOG_INIT_SECTOR);
-	return type_id[0];
+	return (flog_block_type_t)type_id[0];
 }
 
 flog_block_alloc_t flog_allocate_block(){
@@ -1887,6 +1932,45 @@ void flog_flush_dirty_block(){
 		flogfs.dirty_block.block = FLOG_BLOCK_IDX_INVALID;
 	}
 }
+
+
+flog_timestamp_t flog_block_get_init_timestamp(flog_block_idx_t block){
+	flog_timestamp_t ts;
+	flog_open_sector(block, FLOG_INIT_SECTOR);
+	flash_read_sector((uint8_t *)&ts, FLOG_INIT_SECTOR,
+	                  0, sizeof(flog_timestamp_t));
+	return ts;
+}
+
+flog_block_age_t flog_block_get_age(flog_block_idx_t block){
+	flog_block_age_t age;
+	flog_open_sector(block, FLOG_BLK_STAT_SECTOR);
+	flash_read_sector((uint8_t *)&age, FLOG_BLK_STAT_SECTOR,
+	                  0, sizeof(flog_block_stat_sector_t));
+	return age;
+}
+
+void flog_get_file_tail_sector(flog_block_idx_t block,
+                               flog_file_tail_sector_header_t * header){
+	flog_open_sector(block, FLOG_TAIL_SECTOR);
+	flash_read_sector((uint8_t *)header, FLOG_TAIL_SECTOR, 0,
+	                  sizeof(flog_file_tail_sector_header_t));
+}
+
+void flog_get_file_init_sector(flog_block_idx_t block,
+                               flog_file_init_sector_header_t * header){
+	flog_open_sector(block, FLOG_INIT_SECTOR);
+	flash_read_sector((uint8_t *)header, FLOG_INIT_SECTOR, 0,
+	                  sizeof(flog_file_init_sector_header_t));
+}
+
+void flog_get_universal_tail_sector(flog_block_idx_t block,
+                                    flog_universal_tail_sector_t * header){
+	flog_open_sector(block, FLOG_TAIL_SECTOR);
+	flash_read_sector((uint8_t *)header, FLOG_TAIL_SECTOR, 0,
+	                  sizeof(flog_universal_tail_sector_t));
+}
+
 
 #ifndef IS_DOXYGEN
 #if !FLOG_BUILD_CPP

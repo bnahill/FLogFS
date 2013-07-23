@@ -102,6 +102,8 @@ typedef enum {
 //! A marker value to identify a completed inode copy
 static uint8_t const flog_copy_complete_marker = 0x55;
 
+static char const flog_block_stat_key[] = "Bears";
+
 
 typedef struct {
 	//! The age of the block
