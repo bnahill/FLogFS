@@ -107,11 +107,11 @@ typedef struct {
 	//! The age of the block
 	flog_block_age_t age;
 	//! The timestamp of the invalidation
-	flog_timestamp_t invalidation_timestamp;
+	flog_timestamp_t timestamp;
 	//! The next block in the chain
 	flog_block_idx_t next_block;
 	//! The age of @ref next_block
-	flog_block_age_t next_invalidation_age;
+	flog_block_age_t next_age;
 } flog_block_stat_sector_t;
 
 //! @defgroup FLogInodeBlockStructs Inode block structures
@@ -120,6 +120,7 @@ typedef struct {
 typedef struct {
 	//flog_block_age_t age;
 	flog_timestamp_t timestamp;
+	flog_block_idx_t previous;
 } flog_inode_init_sector_t;
 
 typedef struct {
@@ -127,12 +128,6 @@ typedef struct {
 	uint8_t nothing;
 	inode_index_t inode_index;
 } flog_inode_init_sector_spare_t;
-
-typedef struct {
-	flog_block_idx_t next_block;
-	flog_block_age_t next_age;
-	flog_timestamp_t timestamp;
-} flog_inode_tail_sector_t;
 
 typedef struct {
 	flog_timestamp_t timestamp;
@@ -170,6 +165,12 @@ typedef struct {
 typedef struct {
 	flog_timestamp_t timestamp;
 } flog_universal_invalidation_header_t;
+
+typedef struct {
+	flog_block_idx_t next_block;
+	flog_block_age_t next_age;
+	flog_timestamp_t timestamp;
+} flog_universal_tail_sector_t;
 
 //! @defgroup FLogFileBlockStructs File block structures
 //! @brief Descriptions of the data in file blocks

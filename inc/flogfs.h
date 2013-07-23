@@ -101,6 +101,8 @@ typedef struct {
 	flog_block_idx_t block;
 	//! The next block so as to avoid re-reading the header
 	flog_block_idx_t next_block;
+	//! The previous block
+	flog_block_idx_t previous_block;
 	//! The index of the current inode entry -- relative to start point
 	uint16_t inode_idx;
 	//! The index of the current inode block -- absolute
