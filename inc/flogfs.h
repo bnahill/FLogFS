@@ -133,7 +133,6 @@ typedef struct flog_read_file_t {
 	uint16_t offset;
 	//! Number of bytes remaining in current sector
 	uint16_t sector_remaining_bytes;
-	uint8_t  at_eof;
 	
 	uint32_t id;
 	

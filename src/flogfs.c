@@ -972,12 +972,14 @@ done:
 uint32_t flogfs_write(flog_write_file_t * file, uint8_t const * src,
                       uint32_t nbytes){
 	uint32_t count = 0;
+	flog_sector_nbytes_t bytes_written;
 
 	flog_lock_fs();
 	flash_lock();
 
 	while(nbytes){
 		if(nbytes >= file->sector_remaining_bytes){
+			bytes_written = file->sector_remaining_bytes;
 			if(flog_commit_file_sector(file, src,
 				file->sector_remaining_bytes) == FLOG_FAILURE){
 				// Couldn't allocate or something
@@ -985,9 +987,9 @@ uint32_t flogfs_write(flog_write_file_t * file, uint8_t const * src,
 			}
 
 			// Now that sector is completely written
-			src += file->sector_remaining_bytes;
-			nbytes -= file->sector_remaining_bytes;
-			count += file->sector_remaining_bytes;
+			src += bytes_written;
+			nbytes -= bytes_written;
+			count += bytes_written;
 		} else {
 			// This is smaller than a sector; cache it
 			memcpy(file->sector_buffer + file->offset, src, nbytes);
