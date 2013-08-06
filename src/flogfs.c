@@ -352,6 +352,10 @@ flog_result_t flogfs_format(){
 	
 	flash_lock();
 	flog_lock_fs();
+	
+	if(flogfs.state == FLOG_STATE_MOUNTED){
+		flogfs.state == FLOG_STATE_RESET;
+	}
 
 	for(i = 0; i < FS_NUM_BLOCKS; i++){
 		flog_open_page(i, 0);
@@ -504,6 +508,12 @@ flog_result_t flogfs_mount(){
 	flogfs.num_free_blocks = 0;
 	flogfs.t_allocation_ceiling = FLOG_TIMESTAMP_INVALID;
 	flogfs.max_file_id = 0;
+	
+	flogfs.cache_status = {0};
+	
+	flogfs.read_head = nullptr;
+	flogfs.write_head = nullptr;
+	flogfs.dirty_block.block = FLOG_BLOCK_IDX_INVALID;
 
 	min_age_block.age = 0xFFFFFFFF;
 	min_age_block.block = FLOG_BLOCK_IDX_INVALID;
