@@ -161,6 +161,8 @@ typedef struct flog_write_file_t {
 	uint16_t bytes_in_block;
 	uint32_t block_age;
 	uint32_t id;
+	
+	int32_t base_threshold;
 
 	uint8_t sector_buffer[FS_SECTOR_SIZE];
 	
