@@ -2019,7 +2019,7 @@ flog_block_age_t flog_block_get_age(flog_block_idx_t block){
 	flog_block_age_t age;
 	flog_open_sector(block, FLOG_BLK_STAT_SECTOR);
 	flash_read_sector((uint8_t *)&age, FLOG_BLK_STAT_SECTOR,
-	                  0, sizeof(flog_block_stat_sector_t));
+	                  0, sizeof(flog_block_age_t));
 	return age;
 }
 
