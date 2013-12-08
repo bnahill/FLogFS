@@ -902,6 +902,23 @@ failure:
 	return FLOG_FAILURE;
 }
 
+flog_result_t flogfs_check_exists(char const * filename){
+	flog_inode_iterator_t inode_iter;
+	flog_file_find_result_t find_result;
+	flog_result_t result;
+	
+	flog_lock_fs();
+	flash_lock();
+	find_result = flog_find_file(filename, &inode_iter);
+	flash_unlock();
+	flog_unlock_fs();
+
+	result = (find_result.first_block == FLOG_BLOCK_IDX_INVALID) ?
+	   FLOG_FAILURE : FLOG_SUCCESS;
+
+	return result;
+}
+
 uint32_t flogfs_read(flog_read_file_t * file, uint8_t * dst, uint32_t nbytes){
 	uint32_t count = 0;
 	uint16_t to_read;
@@ -989,16 +1006,18 @@ uint32_t flogfs_read(flog_read_file_t * file, uint8_t * dst, uint32_t nbytes){
 		// Figure out how many to read
 		to_read = MIN(nbytes, file->sector_remaining_bytes);
 
-		// Read this sector now
-		flog_open_sector(file->block, file->sector);
-		flash_read_sector(dst, file->sector, file->offset, to_read);
-		count += to_read;
-		nbytes -= to_read;
-		dst += to_read;
-		// Update file stats
-		file->offset += to_read;
-		file->sector_remaining_bytes -= to_read;
-		file->read_head += to_read;
+		if(to_read){
+			// Read this sector now
+			flog_open_sector(file->block, file->sector);
+			flash_read_sector(dst, file->sector, file->offset, to_read);
+			count += to_read;
+			nbytes -= to_read;
+			dst += to_read;
+			// Update file stats
+			file->offset += to_read;
+			file->sector_remaining_bytes -= to_read;
+			file->read_head += to_read;
+		}
 	}
 
 

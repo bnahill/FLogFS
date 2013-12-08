@@ -248,6 +248,14 @@ uint32_t flogfs_write(flog_write_file_t * file, uint8_t const * src,
                       uint32_t nbytes);
 
 /*!
+ @brief Check if a file exists in the filesystem
+ @param filename The 0-terminated filename to check for
+ @retval FLOG_SUCCESS If the file exists
+ @retval FLOG_FAILURE If the file doesn't exist
+ */
+flog_result_t flogfs_check_exists(char const * filename);
+
+/*!
  @brief Start listing files (lock inode table)
  */
 void flogfs_start_ls(flogfs_ls_iterator_t * iter);
